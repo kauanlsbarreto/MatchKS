@@ -1,0 +1,26 @@
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MatchKS", "MatchKS.csproj", "{5E0CE110-C973-8249-3D58-1E54117E11A9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5E0CE110-C973-8249-3D58-1E54117E11A9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5E0CE110-C973-8249-3D58-1E54117E11A9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5E0CE110-C973-8249-3D58-1E54117E11A9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5E0CE110-C973-8249-3D58-1E54117E11A9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E5E59C99-BC54-4729-9DE6-C2253022CAFD}
+	EndGlobalSection
+EndGlobal
+
+
