@@ -76,6 +76,7 @@ Campos principais:
 
 - `.nometime <nome>`: define nome do time do lado atual
 - `.r`, `.ready`, `.pronto`: marca ready do time
+- `.rrlive`: confirma retomada apos restore (precisa 1 confirmacao de cada time)
 - `.stay` ou `.ficar`: manter lado apos faca
 - `.switch` ou `.trocar`: trocar lado apos faca
 - `.tac` ou `.timeout`: pausa tatica
@@ -94,15 +95,26 @@ Persistencia fica em `team_name_owner.json`.
 
 ## Backup E Restore
 
-O plugin cria backup no inicio de cada round e atualiza no fim.
+O plugin cria backup no inicio de cada round (snapshot de inicio).
 
 - Nome do backup e deterministico por estado de round/placar
 - Evita gerar arquivo novo desnecessario em replay apos `restore`
+- Fluxo de restore mais proximo do MatchZy: apos `.restore <round>`, a partida entra em pausa de confirmacao
 
 Comandos:
 
 - `.backups`
 - `.restore <round>`
+- `.rrlive` (jogadores)
+- `.ready` (admin override para liberar sem esperar ambos os times)
+
+### Fluxo Pos-Restore
+
+1. Admin usa `.restore <round>`.
+2. Plugin carrega o backup e pausa a partida automaticamente (`mp_pause_match`).
+3. Um jogador de cada lado usa `.rrlive`.
+4. Quando TR e CT confirmam, plugin libera com `mp_unpause_match`.
+5. Se necessario, admin pode liberar direto usando `.ready`.
 
 ## Demo GOTV
 

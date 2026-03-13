@@ -68,6 +68,10 @@ public partial class MatchKS : BasePlugin
     private bool _isTechPauseActive = false;
     private bool _isTechPauseScheduled = false;
 
+    private bool _isRestorePauseActive = false;
+    private bool _isRestoreReadyT = false;
+    private bool _isRestoreReadyCT = false;
+
 
     private ulong _ctNamerSteamId;
     private ulong _trNamerSteamId;
@@ -83,6 +87,8 @@ public partial class MatchKS : BasePlugin
     private bool _isSidePickPhase = false;
     private bool _isSideSwapPending = false;
     private Timer? _sidePickTimer;
+    private Timer? _sidePickDisplayTimer;
+    private int _sidePickCountdown = 0;
     private readonly HttpClient _httpClient = new();
 
     public int PausesTaticoPorEquipe { get; set; } = 2;
@@ -290,8 +296,12 @@ public partial class MatchKS : BasePlugin
         _isPauseActive = false;
         _isTechPauseActive = false;
         _pausingTeam = null;
+        _isRestorePauseActive = false;
+        _isRestoreReadyT = false;
+        _isRestoreReadyCT = false;
 
         _sidePickTimer?.Kill();
+        _sidePickDisplayTimer?.Kill();
         _tacTimer?.Kill();
         _pauseDisplayTimer?.Kill();
 
@@ -381,20 +391,76 @@ public partial class MatchKS : BasePlugin
     [GameEventHandler]
     public HookResult OnRoundEnd(EventRoundEnd @event, GameEventInfo info)
     {
-        if (_isMatchLive && !string.IsNullOrEmpty(_currentRoundBackupFile))
+        if (_isKnifeRoundActive)
         {
-            var relativePath = Path.Join("BackupMatchKS", _currentRoundBackupFile).Replace('\\', '/');
-            Server.ExecuteCommand($"mp_backup_round_file_last \"{relativePath}\"");
-            Logger.LogInformation($"[MatchKS] Backup do round ATUALIZADO em: {relativePath}");
-            _currentRoundBackupFile = "";
-        }
+            var eventWinner = (CsTeam)@event.Winner;
+            var knifeWinner = DetermineKnifeRoundWinner(eventWinner, out var decisionReason);
 
-        if (_isKnifeRoundActive && @event.Winner != (byte)CsTeam.None)
-        {
-            HandleKnifeRoundEnd((CsTeam)@event.Winner);
+            if (knifeWinner != CsTeam.None)
+            {
+                Server.PrintToChatAll($"{ChatPrefix} Round de faca decidido por {ChatColors.Green}{decisionReason}{ChatColors.Default}.");
+                HandleKnifeRoundEnd(knifeWinner);
+            }
         }
 
         return HookResult.Continue;
+    }
+
+    private CsTeam DetermineKnifeRoundWinner(CsTeam eventWinner, out string reason)
+    {
+        reason = "criterio padrao";
+
+        var knifePlayers = Utilities.GetPlayers()
+            .Where(p => p.IsValid && (p.TeamNum == (byte)CsTeam.Terrorist || p.TeamNum == (byte)CsTeam.CounterTerrorist))
+            .ToList();
+
+        var tPlayers = knifePlayers.Where(p => p.TeamNum == (byte)CsTeam.Terrorist).ToList();
+        var ctPlayers = knifePlayers.Where(p => p.TeamNum == (byte)CsTeam.CounterTerrorist).ToList();
+
+        bool tEliminated = !tPlayers.Any(IsAliveWithHealth);
+        bool ctEliminated = !ctPlayers.Any(IsAliveWithHealth);
+
+        if (tEliminated ^ ctEliminated)
+        {
+            reason = "eliminacao total";
+            return tEliminated ? CsTeam.CounterTerrorist : CsTeam.Terrorist;
+        }
+
+        int tTotalHealth = tPlayers.Where(IsAliveWithHealth).Sum(GetPlayerHealthSafe);
+        int ctTotalHealth = ctPlayers.Where(IsAliveWithHealth).Sum(GetPlayerHealthSafe);
+
+        if (tTotalHealth != ctTotalHealth)
+        {
+            reason = $"soma de vida restante (TR {tTotalHealth} x CT {ctTotalHealth})";
+            return tTotalHealth > ctTotalHealth ? CsTeam.Terrorist : CsTeam.CounterTerrorist;
+        }
+
+        int tAliveCount = tPlayers.Count(IsAliveWithHealth);
+        int ctAliveCount = ctPlayers.Count(IsAliveWithHealth);
+        if (tAliveCount != ctAliveCount)
+        {
+            reason = $"desempate por jogadores vivos (TR {tAliveCount} x CT {ctAliveCount})";
+            return tAliveCount > ctAliveCount ? CsTeam.Terrorist : CsTeam.CounterTerrorist;
+        }
+
+        if (eventWinner == CsTeam.Terrorist || eventWinner == CsTeam.CounterTerrorist)
+        {
+            reason = "criterio padrao do jogo (empate)";
+            return eventWinner;
+        }
+
+        reason = "empate sem vencedor";
+        return CsTeam.None;
+    }
+
+    private static bool IsAliveWithHealth(CCSPlayerController player)
+    {
+        return player.PawnIsAlive && player.PlayerPawn?.Value != null && player.PlayerPawn.Value.Health > 0;
+    }
+
+    private static int GetPlayerHealthSafe(CCSPlayerController player)
+    {
+        return player.PlayerPawn?.Value?.Health ?? 0;
     }
 
     public HookResult OnRoundStartBackupHandler(EventRoundStart @event, GameEventInfo info)

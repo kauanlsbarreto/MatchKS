@@ -253,6 +253,7 @@ public partial class MatchKS
     {
         _isSidePickPhase = true;
         _isSideSwapPending = false;
+        _sidePickCountdown = 60;
         Server.ExecuteCommand("mp_pause_match");
 
         var winnerTeamName = GetTeamName((byte)_knifeRoundWinnerTeam!);
@@ -261,7 +262,31 @@ public partial class MatchKS
         Server.PrintToChatAll($"{ChatPrefix} Placar em {ChatColors.Gold}1x0{ChatColors.Default}. Partida pausada para escolha de lado.");
         Server.PrintToChatAll($"{ChatPrefix} Digite {ChatColors.Lime}.stay{ChatColors.Default} ou {ChatColors.Lime}.switch{ChatColors.Default} (ou .ficar/.trocar).");
 
+        _sidePickDisplayTimer?.Kill();
+        _sidePickDisplayTimer = AddTimer(1.0f, UpdateSidePickCountdownHud, TimerFlags.REPEAT);
+
         _sidePickTimer = AddTimer(60.0f, ForceSidePickAndGoLive);
+    }
+
+    private void UpdateSidePickCountdownHud()
+    {
+        if (!_isSidePickPhase)
+        {
+            _sidePickDisplayTimer?.Kill();
+            return;
+        }
+
+        foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid))
+        {
+            p.PrintToCenterHtml(
+                $"<font color='orange'>ESCOLHA DE LADO</font><br><font color='white'>.stay ou .switch</font><br><font size='6' color='lightgreen'>{_sidePickCountdown}s</font>"
+            );
+        }
+
+        if (_sidePickCountdown > 0)
+        {
+            _sidePickCountdown--;
+        }
     }
 
 
@@ -277,7 +302,13 @@ public partial class MatchKS
     public void HandleSidePickDecision(bool swapSides)
     {
         _sidePickTimer?.Kill();
+        _sidePickDisplayTimer?.Kill();
         _isSidePickPhase = false;
+
+        foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid))
+        {
+            p.PrintToCenterHtml(" ");
+        }
 
         if (_activeMatch == null || _knifeRoundWinnerTeam == null) return;
 
@@ -378,9 +409,12 @@ public partial class MatchKS
         _isTeamTReady = false; _isTeamCTReady = false; _isMatchLive = false; _isKnifeRoundActive = false; _isPauseActive = false;
         _knifeRoundWinnerTeam = null; _team1TacPausesUsed = 0; _team2TacPausesUsed = 0; _isTeamChangeLocked = false;
         _ctNamerSteamId = 0; _trNamerSteamId = 0; _isCtNameCustom = false; _isTrNameCustom = false;
+        _isRestorePauseActive = false; _isRestoreReadyT = false; _isRestoreReadyCT = false;
         _isSidePickPhase = false;
         _isSideSwapPending = false;
+        _sidePickCountdown = 0;
         _sidePickTimer?.Kill();
+        _sidePickDisplayTimer?.Kill();
     }
     private void UpdateTeamNames()
     {

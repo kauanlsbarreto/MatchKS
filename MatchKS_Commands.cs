@@ -491,9 +491,112 @@ public partial class MatchKS
         Server.ExecuteCommand("mp_unpause_match");
     }
 
+    private bool IsReadyAdminOverride(CCSPlayerController? player)
+    {
+        if (player == null || !player.IsValid)
+        {
+            return true;
+        }
+
+        return AdminManager.PlayerHasPermissions(player, "@css/kick");
+    }
+
+    private void StartRestorePauseFlow(int targetRound)
+    {
+        _isPauseScheduled = false;
+        _isTechPauseScheduled = false;
+        _isPauseActive = false;
+        _isTechPauseActive = false;
+        _tacTimer?.Kill();
+        _pauseDisplayTimer?.Kill();
+
+        _isRestorePauseActive = true;
+        _isRestoreReadyT = false;
+        _isRestoreReadyCT = false;
+
+        AddTimer(0.6f, () =>
+        {
+            Server.ExecuteCommand("mp_pause_match");
+            Server.PrintToChatAll($"{ChatPrefix} Restore do round {ChatColors.Green}{targetRound}{ChatColors.Default} carregado e partida pausada.");
+            Server.PrintToChatAll($"{ChatPrefix} Para continuar: um jogador de cada time deve usar {ChatColors.Lime}.rrlive{ChatColors.Default}.");
+            Server.PrintToChatAll($"{ChatPrefix} Admin pode liberar direto com {ChatColors.Lime}.ready{ChatColors.Default}.");
+        });
+    }
+
+    private void ReleaseRestorePause(string actor)
+    {
+        _isRestorePauseActive = false;
+        _isRestoreReadyT = false;
+        _isRestoreReadyCT = false;
+        Server.ExecuteCommand("mp_unpause_match");
+        Server.PrintToChatAll($"{ChatPrefix} Restore confirmado por {ChatColors.Green}{actor}{ChatColors.Default}. Partida retomada!");
+    }
+
+    private void RegisterRestoreReady(CCSPlayerController player)
+    {
+        if (!_isRestorePauseActive)
+        {
+            player.PrintToChat($"{ChatPrefix} Não existe restore pendente para liberar.");
+            return;
+        }
+
+        if (player.TeamNum != (byte)CsTeam.Terrorist && player.TeamNum != (byte)CsTeam.CounterTerrorist)
+        {
+            player.PrintToChat($"{ChatPrefix} Entre em TR ou CT para confirmar o restore.");
+            return;
+        }
+
+        if (player.TeamNum == (byte)CsTeam.Terrorist)
+        {
+            if (_isRestoreReadyT)
+            {
+                player.PrintToChat($"{ChatPrefix} Seu time ja confirmou com .rrlive.");
+                return;
+            }
+
+            _isRestoreReadyT = true;
+            Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{GetTeamName((byte)CsTeam.Terrorist)}{ChatColors.Default} confirmou com .rrlive.");
+        }
+        else
+        {
+            if (_isRestoreReadyCT)
+            {
+                player.PrintToChat($"{ChatPrefix} Seu time ja confirmou com .rrlive.");
+                return;
+            }
+
+            _isRestoreReadyCT = true;
+            Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{GetTeamName((byte)CsTeam.CounterTerrorist)}{ChatColors.Default} confirmou com .rrlive.");
+        }
+
+        if (_isRestoreReadyT && _isRestoreReadyCT)
+        {
+            ReleaseRestorePause("ambos os times");
+            return;
+        }
+
+        var waitingFor = new System.Collections.Generic.List<string>();
+        if (!_isRestoreReadyT) waitingFor.Add(GetTeamName((byte)CsTeam.Terrorist));
+        if (!_isRestoreReadyCT) waitingFor.Add(GetTeamName((byte)CsTeam.CounterTerrorist));
+        Server.PrintToChatAll($"{ChatPrefix} Aguardando .rrlive de: {ChatColors.Green}{string.Join(", ", waitingFor)}");
+    }
+
     [ConsoleCommand("css_r"), ConsoleCommand("css_ready"), ConsoleCommand("css_pronto")]
     public void OnUnifiedReadyCommand(CCSPlayerController? player, CommandInfo command)
     {
+        if (_isRestorePauseActive)
+        {
+            if (IsReadyAdminOverride(player))
+            {
+                var actor = player?.IsValid == true ? player.PlayerName : "CONSOLE";
+                ReleaseRestorePause(actor);
+                return;
+            }
+
+            player?.PrintToChat($"{ChatPrefix} Apenas admin pode usar .ready para liberar restore. Use .rrlive pelo seu time.");
+            return;
+        }
+
         if (player == null || !player.IsValid || _isMatchLive) return;
 
         int teamPlayerCount = Utilities.GetPlayers().Count(p => p.TeamNum == player.TeamNum && p.IsValid && !p.IsBot && p.Connected == PlayerConnectedState.PlayerConnected);
@@ -516,6 +619,14 @@ public partial class MatchKS
             Server.PrintToChatAll($"{MatchKS.ChatPrefix} {ChatColors.Olive}{player.PlayerName}{ChatColors.Default} confirmou o pronto para o time {ChatColors.LightBlue}CONTRA-TERRORISTA!");
             CheckIfMatchCanStart();
         }
+    }
+
+    [ConsoleCommand("css_rrlive")]
+    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    public void OnRestoreReadyCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null || !player.IsValid) return;
+        RegisterRestoreReady(player);
     }
 
     [ConsoleCommand("css_backups"), RequiresPermissions("@css/kick")]
@@ -623,6 +734,7 @@ public partial class MatchKS
             Server.PrintToChatAll($"{MatchKS.ChatPrefix} Carregando arquivo: {relativePath}");
             _currentRoundBackupFile = string.Empty;
             Server.ExecuteCommand($"mp_backup_restore_load_file \"{relativePath}\"");
+            StartRestorePauseFlow(targetRound);
         }
         else
         {
