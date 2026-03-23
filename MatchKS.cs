@@ -27,7 +27,7 @@ public partial class MatchKS : BasePlugin
 
 {
     public override string ModuleName => "MatchKS Plugin";
-    public override string ModuleVersion => "1.0.5";
+    public override string ModuleVersion => "1.0.6";
     public override string ModuleAuthor => "Kauan";
     public static string ChatPrefixText = "MatchKS";
     public static string ChatPrefixColor = ChatColors.Blue.ToString();
@@ -40,11 +40,22 @@ public partial class MatchKS : BasePlugin
     private string PluginConfigPath => Path.Combine(FeseeCfgFolderPath, "config.cfg");
     private string TeamNameOwnerConfigPath => Path.Combine(FeseeCfgFolderPath, "team_name_owner.json");
     private string MatchSummaryFolderPath => Path.Combine(FeseeCfgFolderPath, "history");
-    private string FeseeCfgFolderPath => Path.Combine(Server.GameDirectory, "csgo", "cfg", "MatchKS");
+    private string CsgoRootPath
+    {
+        get
+        {
+            var normalized = Server.GameDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var tail = Path.GetFileName(normalized);
+            if (string.Equals(tail, "csgo", StringComparison.OrdinalIgnoreCase))
+            {
+                return normalized;
+            }
 
-    public static string BackupFolderPath { get; private set; } = "";
+            return Path.Combine(normalized, "csgo");
+        }
+    }
 
-    private string _currentRoundBackupFile = "";
+    private string FeseeCfgFolderPath => Path.Combine(CsgoRootPath, "cfg", "MatchKS");
 
     private string? _currentDemoName = null;
     private bool _isDemoStartPending = false;
@@ -54,7 +65,6 @@ public partial class MatchKS : BasePlugin
     private bool _isTeamChangeLocked = false;
     private CsTeam? _knifeRoundWinnerTeam;
     private int _team1TacPausesUsed, _team2TacPausesUsed;
-    private int _currentRoundNumber = 0;
     private bool _isSkinCheckerEnabled = false;
 
     private bool _isPauseActive;
@@ -67,11 +77,8 @@ public partial class MatchKS : BasePlugin
 
     private bool _isTechPauseActive = false;
     private bool _isTechPauseScheduled = false;
-
-    private bool _isRestorePauseActive = false;
-    private bool _isRestoreReadyT = false;
-    private bool _isRestoreReadyCT = false;
-
+    private CsTeam _techPauseTeam = CsTeam.None;
+    private CsTeam _techPauseScheduledTeam = CsTeam.None;
 
     private ulong _ctNamerSteamId;
     private ulong _trNamerSteamId;
@@ -80,7 +87,7 @@ public partial class MatchKS : BasePlugin
     private TeamNameOwnerConfig _teamNameOwnerConfig = new();
 
     private bool _mapLogicHasRun = false;
-    private Timer? _competitiveCheckTimer, _readyStatusTimer;
+    private Timer? _competitiveCheckTimer, _readyStatusTimer, _commandsAnnounceTimer;
 
     private bool _gotvSettingsApplied = false;
 
@@ -90,6 +97,13 @@ public partial class MatchKS : BasePlugin
     private Timer? _sidePickDisplayTimer;
     private int _sidePickCountdown = 0;
     private readonly HttpClient _httpClient = new();
+
+    // Restore-after-crash / readyrr state
+    private bool _crashRecoveryChecked = false;
+    private bool _isWaitingForRestoreReady = false;
+    private bool _isTeamTRestoreReady = false;
+    private bool _isTeamCTRestoreReady = false;
+    private Timer? _restoreReadyDisplayTimer;
 
     public int PausesTaticoPorEquipe { get; set; } = 2;
     public int DuracaoPauseTatico { get; set; } = 60;
@@ -101,13 +115,6 @@ public partial class MatchKS : BasePlugin
         Logger.LogInformation($"[MatchKS DEBUG] Carregando Plugin v{ModuleVersion}...");
         AddTimer(10.0f, SyncTvDelayAcrossConfigs);
 
-        BackupFolderPath = Path.Join(Server.GameDirectory, "csgo", "BackupMatchKS");
-        if (!Directory.Exists(BackupFolderPath))
-        {
-            Directory.CreateDirectory(BackupFolderPath);
-            Logger.LogInformation($"[MatchKS] Diretório de backups criado em: {BackupFolderPath}");
-        }
-
         RegisterListener<Listeners.OnMapStart>(mapName =>
         {
             _mapLogicHasRun = false;
@@ -115,8 +122,6 @@ public partial class MatchKS : BasePlugin
             AddTimer(1.0f, RunMapStartLogic);
             AddTimer(5.0f, ApplyGotvSettings);
         });
-
-        RegisterEventHandler<EventRoundStart>(OnRoundStartBackupHandler, HookMode.Post);
 
         RegisterEventHandler<EventMapShutdown>(OnMapShutdownHandler);
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeamChange);
@@ -126,6 +131,7 @@ public partial class MatchKS : BasePlugin
 
         if (!Directory.Exists(FeseeCfgFolderPath)) { Directory.CreateDirectory(FeseeCfgFolderPath); }
         LoadConfigFromCfg();
+        EnsureMatchKSCfgsExist();
         LoadTeamNameOwnerConfig();
 
         if (File.Exists(ActiveMatchFilePath))
@@ -151,6 +157,8 @@ public partial class MatchKS : BasePlugin
                 $"DuracaoPauseTatico={_pluginConfig.DuracaoPauseTatico}",
                 $"RoundFaca={(_pluginConfig.RoundFaca ? "true" : "false")}",
                 $"FogoAmigo={(_pluginConfig.FogoAmigo ? "true" : "false")}",
+                $"EnableOvertime={(_pluginConfig.EnableOvertime ? "true" : "false")}",
+                $"OvertimeStartMoney={_pluginConfig.OvertimeStartMoney}",
                 $"ChatPrefixText=\"{ChatPrefixText}\"",
                 "ChatPrefixColor=\"blue\"",
                 "nome_formato_demo=\"{TIME}_{MATCH_ID}_{MAP}_{TEAM1}_vs_{TEAM2}\"",
@@ -192,6 +200,14 @@ public partial class MatchKS : BasePlugin
         if (configDict.TryGetValue("FogoAmigo", out var ff) && bool.TryParse(ff, out var ffValue))
         {
             _pluginConfig.FogoAmigo = ffValue;
+        }
+        if (configDict.TryGetValue("EnableOvertime", out var enableOt) && bool.TryParse(enableOt, out var enableOtValue))
+        {
+            _pluginConfig.EnableOvertime = enableOtValue;
+        }
+        if (configDict.TryGetValue("OvertimeStartMoney", out var otMoney) && int.TryParse(otMoney, out var otMoneyValue) && otMoneyValue >= 0)
+        {
+            _pluginConfig.OvertimeStartMoney = otMoneyValue;
         }
         if (configDict.TryGetValue("ChatPrefixText", out var prefixText) && !string.IsNullOrWhiteSpace(prefixText))
         {
@@ -290,20 +306,22 @@ public partial class MatchKS : BasePlugin
         _knifeRoundWinnerTeam = null;
         _team1TacPausesUsed = 0;
         _team2TacPausesUsed = 0;
-        _currentRoundNumber = 0;
         _isDemoStartPending = false;
 
         _isPauseActive = false;
         _isTechPauseActive = false;
         _pausingTeam = null;
-        _isRestorePauseActive = false;
-        _isRestoreReadyT = false;
-        _isRestoreReadyCT = false;
+        _techPauseTeam = CsTeam.None;
+        _techPauseScheduledTeam = CsTeam.None;
 
         _sidePickTimer?.Kill();
         _sidePickDisplayTimer?.Kill();
         _tacTimer?.Kill();
         _pauseDisplayTimer?.Kill();
+        _isWaitingForRestoreReady = false;
+        _isTeamTRestoreReady = false;
+        _isTeamCTRestoreReady = false;
+        _restoreReadyDisplayTimer?.Kill();
 
         Logger.LogInformation("[MatchKS] O estado da partida foi reiniciado.");
     }
@@ -463,49 +481,14 @@ public partial class MatchKS : BasePlugin
         return player.PlayerPawn?.Value?.Health ?? 0;
     }
 
-    public HookResult OnRoundStartBackupHandler(EventRoundStart @event, GameEventInfo info)
-    {
-        if (_isMatchLive && _activeMatch != null)
-        {
-            if (_isDemoStartPending)
-            {
-                StartDemoRecording();
-                _isDemoStartPending = false;
-            }
-
-            var teamEntities = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
-            var teamCt = teamEntities.FirstOrDefault(t => t.TeamNum == (byte)CsTeam.CounterTerrorist);
-            var teamTr = teamEntities.FirstOrDefault(t => t.TeamNum == (byte)CsTeam.Terrorist);
-
-            if (teamCt == null || teamTr == null) return HookResult.Continue;
-
-            int score1 = _activeMatch.Team1.Name == GetTeamName((byte)CsTeam.Terrorist) ? teamTr.Score : teamCt.Score;
-            int score2 = _activeMatch.Team2.Name == GetTeamName((byte)CsTeam.CounterTerrorist) ? teamCt.Score : teamTr.Score;
-            _currentRoundNumber = teamCt.Score + teamTr.Score;
-
-            var team1Name = SanitizeFileName(_activeMatch.Team1.Name);
-            var team2Name = SanitizeFileName(_activeMatch.Team2.Name);
-            var mapName = SanitizeFileName(Server.MapName);
-
-            // Nome deterministico evita criar novos backups para o mesmo estado apos restore.
-            var fileName = $"{team1Name}_{team2Name}_{mapName}_{_currentRoundNumber}_{score1}_{score2}.txt";
-            _currentRoundBackupFile = fileName;
-
-            var relativePath = Path.Join("BackupMatchKS", fileName).Replace('\\', '/');
-
-            Server.ExecuteCommand($"mp_backup_round_file \"{relativePath}\"");
-            Logger.LogInformation($"[MatchKS] Backup de INÍCIO de round salvo em: {relativePath}");
-        }
-        return HookResult.Continue;
-    }
-
     private void CreateDefaultPugMatch()
     {
         _activeMatch = new MatchConfig
         {
             Team1 = new MatchTeam { Name = "Terroristas", Tag = "TR" },
             Team2 = new MatchTeam { Name = "Contra-Terroristas", Tag = "CT" },
-            MapList = new List<MapConfig> { new MapConfig { Name = Server.MapName } }
+            MapList = new List<MapConfig> { new MapConfig { Name = Server.MapName } },
+            EnableOvertime = _pluginConfig.EnableOvertime
         };
     }
 
@@ -515,18 +498,11 @@ public partial class MatchKS : BasePlugin
         return HookResult.Continue;
     }
 
-    public HookResult OnPlayerConnectFullHandler(EventPlayerConnectFull @event, GameEventInfo info)
-    {
-        if (!_mapLogicHasRun)
-        {
-            _mapLogicHasRun = true;
-            AddTimer(1.0f, RunMapStartLogic);
-        }
-        return HookResult.Continue;
-    }
-
     private void RunMapStartLogic()
     {
+        if (_mapLogicHasRun) return;
+        _mapLogicHasRun = true;
+
         Logger.LogInformation($"[MatchKS] Lógica de início de mapa executada para '{Server.MapName}'.");
 
         if (_activeMatch == null)
@@ -536,7 +512,6 @@ public partial class MatchKS : BasePlugin
         }
 
         _mapDamageByPlayer.Clear();
-
         ResetMapStates();
         var currentMap = _activeMatch!.MapList[_activeMatch.CurrentMapIndex];
         _isKnifeRoundEnabledForCurrentMap = currentMap.EnableKnifeRound;
@@ -546,40 +521,21 @@ public partial class MatchKS : BasePlugin
 
         _readyStatusTimer?.Kill();
         _competitiveCheckTimer?.Kill();
+        _commandsAnnounceTimer?.Kill();
 
         _readyStatusTimer = AddTimer(15.0f, AnnounceReadyStatus, TimerFlags.REPEAT | TimerFlags.STOP_ON_MAPCHANGE);
         _competitiveCheckTimer = AddTimer(15.0f, CheckCompetitiveMode, TimerFlags.REPEAT | TimerFlags.STOP_ON_MAPCHANGE);
+        _commandsAnnounceTimer = AddTimer(5.0f, () =>
+        {
+            if (_isMatchLive) { _commandsAnnounceTimer?.Kill(); return; }
+            AnnounceMatchCommands();
+        }, TimerFlags.REPEAT | TimerFlags.STOP_ON_MAPCHANGE);
 
-        Server.ExecuteCommand("mp_backup_round_file_pattern ''");
-        Server.ExecuteCommand("mp_backup_rules_changed_on_live 1");
+        _crashRecoveryChecked = false;
+        AddTimer(20.0f, CheckForCrashRecovery);
 
         Server.ExecuteCommand($"hostname \"{_activeMatch.Hostname}\"");
         Server.ExecuteCommand($"mp_friendlyfire {(_activeMatch.EnableFriendlyFire ? 1 : 0)}");
-
-        AddTimer(3.0f, () =>
-        {
-            if (_activeMatch == null) return;
-
-            Server.PrintToChatAll($"{ChatPrefix} Restaurando times da partida...");
-
-            foreach (var playerSteamIdStr in _activeMatch.Team1.Players.Keys)
-            {
-                var player = Utilities.GetPlayerFromSteamId(ulong.Parse(playerSteamIdStr));
-                if (player != null && player.IsValid && player.TeamNum != (byte)CsTeam.Terrorist)
-                {
-                    player.SwitchTeam(CsTeam.Terrorist);
-                }
-            }
-
-            foreach (var playerSteamIdStr in _activeMatch.Team2.Players.Keys)
-            {
-                var player = Utilities.GetPlayerFromSteamId(ulong.Parse(playerSteamIdStr));
-                if (player != null && player.IsValid && player.TeamNum != (byte)CsTeam.CounterTerrorist)
-                {
-                    player.SwitchTeam(CsTeam.CounterTerrorist);
-                }
-            }
-        });
     }
 
     private void ApplyGotvSettings()
@@ -590,6 +546,241 @@ public partial class MatchKS : BasePlugin
         Server.ExecuteCommand("exec MatchKS/gotv.cfg");
         Server.PrintToConsole("[MatchKS] Configurações da GOTV aplicadas com sucesso.");
         _gotvSettingsApplied = true;
+    }
+
+    // Cria warmup.cfg e knife.cfg com padrões se ainda não existirem no servidor.
+    private void EnsureMatchKSCfgsExist()
+    {
+        var cfgDir = Path.Join(Server.GameDirectory, "csgo", "cfg", "MatchKS");
+        try
+        {
+            Directory.CreateDirectory(cfgDir);
+
+            var warmupPath = Path.Combine(cfgDir, "warmup.cfg");
+            if (!File.Exists(warmupPath))
+            {
+                File.WriteAllLines(warmupPath, new[]
+                {
+                    "// MatchKS - Configuração de Aquecimento",
+                    "// Este arquivo é criado automaticamente. Edite conforme necessário.",
+                    "mp_warmuptime 999",
+                    "mp_buy_anywhere 1",
+                    "mp_buytime 9999",
+                    "mp_autoteambalance 0",
+                    "mp_limitteams 0",
+                    "mp_endwarmup_player_count 0",
+                    "mp_friendlyfire 0",
+                    "sv_cheats 0",
+                    "mp_freezetime 6",
+                });
+                Logger.LogInformation($"[MatchKS] warmup.cfg criado em: {warmupPath}");
+            }
+
+            var knifePath = Path.Combine(cfgDir, "knife.cfg");
+            if (!File.Exists(knifePath))
+            {
+                File.WriteAllLines(knifePath, new[]
+                {
+                    "// MatchKS - Configuração do Round de Faca",
+                    "// Este arquivo é criado automaticamente. Edite conforme necessário.",
+                    "mp_maxrounds 2",
+                    "mp_roundtime 2",
+                    "mp_roundtime_defuse 2",
+                    "mp_startmoney 0",
+                    "mp_maxmoney 0",
+                    "mp_buy_anywhere 0",
+                    "mp_friendlyfire 0",
+                    "sv_cheats 0",
+                    "mp_freezetime 6",
+                });
+                Logger.LogInformation($"[MatchKS] knife.cfg criado em: {knifePath}");
+            }
+
+            var livePath = Path.Combine(cfgDir, "live.cfg");
+            if (!File.Exists(livePath))
+            {
+                var ffDefault = _pluginConfig.FogoAmigo ? 1 : 0;
+                var otDefault = _pluginConfig.EnableOvertime ? 1 : 0;
+                var otMoneyDefault = _pluginConfig.OvertimeStartMoney;
+                File.WriteAllLines(livePath, new[]
+                {
+                    "// MatchKS - Configuração de Partida Ao Vivo",
+                    "// mp_friendlyfire, mp_overtime_enable e mp_overtime_startmoney são sincronizados pelo plugin.",
+                    $"mp_friendlyfire {ffDefault}",
+                    $"mp_overtime_enable {otDefault}",
+                    "mp_overtime_maxrounds 6",
+                    $"mp_overtime_startmoney {otMoneyDefault}",
+                    "mp_maxrounds 24",
+                    "sv_cheats 0",
+                    "mp_autoteambalance 0",
+                    "mp_limitteams 0",
+                    "mp_buytime 20",
+                    "mp_buy_anywhere 0",
+                    "mp_freezetime 15",
+                    "mp_roundtime 1.92",
+                    "mp_roundtime_defuse 1.92",
+                });
+                Logger.LogInformation($"[MatchKS] live.cfg criado em: {livePath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"[MatchKS] Erro ao verificar/criar CFGs padrão: {ex.Message}");
+        }
+    }
+
+    // Persiste info de sessão em session_info.json dentro do diretório de backup atual.
+    private void WriteSessionInfo(int round)
+    {
+        if (_activeMatch == null) return;
+        var dir = GetCurrentBackupDirectory();
+        if (!Directory.Exists(dir)) return;
+        try
+        {
+            var info = new BackupSessionInfo
+            {
+                Team1Players = new Dictionary<string, string>(_activeMatch.Team1.Players),
+                Team2Players = new Dictionary<string, string>(_activeMatch.Team2.Players),
+                Team1Name = _activeMatch.Team1.Name,
+                Team2Name = _activeMatch.Team2.Name,
+                MapName = Server.MapName,
+                LastBackupRound = round,
+                MatchEnded = false
+            };
+            File.WriteAllText(
+                Path.Combine(dir, "session_info.json"),
+                JsonSerializer.Serialize(info, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"[MatchKS] Erro ao salvar session_info.json: {ex.Message}");
+        }
+    }
+
+    // Marca a sessão como encerrada para que o crash recovery não a ofereça novamente.
+    private void MarkSessionEnded()
+    {
+        var dir = GetCurrentBackupDirectory();
+        var path = Path.Combine(dir, "session_info.json");
+        if (!File.Exists(path)) return;
+        try
+        {
+            var info = JsonSerializer.Deserialize<BackupSessionInfo>(File.ReadAllText(path));
+            if (info == null) return;
+            info.MatchEnded = true;
+            File.WriteAllText(path, JsonSerializer.Serialize(info, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"[MatchKS] Erro ao marcar sessão encerrada: {ex.Message}");
+        }
+    }
+
+    // Verifica se há uma sessão anterior não finalizada com os mesmos jogadores (crash recovery).
+    private void CheckForCrashRecovery()
+    {
+        if (_crashRecoveryChecked || _isMatchLive) return;
+        _crashRecoveryChecked = true;
+
+        var root = GetBackupRootPath();
+        if (!Directory.Exists(root)) return;
+
+        var currentIds = Utilities.GetPlayers()
+            .Where(p => p.IsValid && !p.IsBot && p.Connected == PlayerConnectedState.PlayerConnected)
+            .Select(p => p.SteamID.ToString())
+            .ToHashSet();
+
+        if (currentIds.Count == 0) return;
+
+        try
+        {
+            foreach (var dir in Directory.GetDirectories(root, "*", SearchOption.TopDirectoryOnly)
+                                         .OrderByDescending(d => Directory.GetLastWriteTimeUtc(d)))
+            {
+                var sessionPath = Path.Combine(dir, "session_info.json");
+                if (!File.Exists(sessionPath)) continue;
+
+                BackupSessionInfo? info;
+                try { info = JsonSerializer.Deserialize<BackupSessionInfo>(File.ReadAllText(sessionPath)); }
+                catch { continue; }
+
+                if (info == null || info.MatchEnded || info.LastBackupRound <= 0) continue;
+
+                var sessionIds = info.Team1Players.Keys.Concat(info.Team2Players.Keys).ToHashSet();
+                if (sessionIds.Count == 0) continue;
+
+                int overlap = sessionIds.Count(id => currentIds.Contains(id));
+                int threshold = Math.Max(1, (int)Math.Ceiling(sessionIds.Count * 0.7));
+                if (overlap < threshold) continue;
+
+                var backups = GetBackupsFromDirectory(dir);
+                int lastRound = backups.Count > 0 ? backups.Max(b => b.Round) : info.LastBackupRound;
+
+                Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Red}[CRASH RECOVERY]{ChatColors.Default} Partida anterior detectada: {ChatColors.Gold}{info.Team1Name}{ChatColors.Default} vs {ChatColors.Gold}{info.Team2Name}{ChatColors.Default} | Mapa: {ChatColors.Green}{info.MapName}{ChatColors.Default}");
+                Server.PrintToChatAll($"{ChatPrefix} Round {ChatColors.Green}{lastRound}{ChatColors.Default} disponível ({overlap}/{sessionIds.Count} jogadores reconectados).");
+                Server.PrintToChatAll($"{ChatPrefix} Dê {ChatColors.Green}.ready{ChatColors.Default} nos dois times. Após partir ficará {ChatColors.Green}ao vivo{ChatColors.Default}, o {ChatColors.Red}admin{ChatColors.Default} usa {ChatColors.Green}.restore {lastRound}{ChatColors.Default} para restaurar.");
+                break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"[MatchKS] Erro no crash recovery check: {ex.Message}");
+        }
+    }
+
+    // Atualiza mp_friendlyfire, mp_overtime_enable e mp_overtime_startmoney no live.cfg conforme o config.cfg.
+    internal void SyncLiveCfgFromPluginConfig()
+    {
+        var livePath = Path.Join(Server.GameDirectory, "csgo", "cfg", "MatchKS", "live.cfg");
+        var ffValue = _pluginConfig.FogoAmigo ? 1 : 0;
+        var otValue = (_activeMatch?.EnableOvertime ?? _pluginConfig.EnableOvertime) ? 1 : 0;
+        var otMoneyValue = _pluginConfig.OvertimeStartMoney;
+
+        try
+        {
+            if (!File.Exists(livePath))
+            {
+                EnsureMatchKSCfgsExist();
+                if (!File.Exists(livePath)) return;
+            }
+
+            var lines = File.ReadAllLines(livePath).ToList();
+            bool ffFound = false, otFound = false, otMoneyFound = false;
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var trimmed = lines[i].Trim();
+                if (trimmed.StartsWith("mp_friendlyfire", StringComparison.OrdinalIgnoreCase)
+                    && !trimmed.StartsWith("//"))
+                {
+                    lines[i] = $"mp_friendlyfire {ffValue}";
+                    ffFound = true;
+                }
+                else if (trimmed.StartsWith("mp_overtime_enable", StringComparison.OrdinalIgnoreCase)
+                         && !trimmed.StartsWith("//"))
+                {
+                    lines[i] = $"mp_overtime_enable {otValue}";
+                    otFound = true;
+                }
+                else if (trimmed.StartsWith("mp_overtime_startmoney", StringComparison.OrdinalIgnoreCase)
+                         && !trimmed.StartsWith("//"))
+                {
+                    lines[i] = $"mp_overtime_startmoney {otMoneyValue}";
+                    otMoneyFound = true;
+                }
+            }
+
+            if (!ffFound) lines.Add($"mp_friendlyfire {ffValue}");
+            if (!otFound) lines.Add($"mp_overtime_enable {otValue}");
+            if (!otMoneyFound) lines.Add($"mp_overtime_startmoney {otMoneyValue}");
+
+            File.WriteAllLines(livePath, lines);
+            Logger.LogInformation($"[MatchKS] live.cfg sincronizado — FogoAmigo={ffValue}, Overtime={otValue}, OvertimeMoney={otMoneyValue}");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"[MatchKS] Erro ao sincronizar live.cfg: {ex.Message}");
+        }
     }
 
     public HookResult OnGameEnd(EventGameEnd @event, GameEventInfo info)
@@ -664,8 +855,8 @@ public partial class MatchKS : BasePlugin
         }
         
         StopDemoRecording();
+        MarkSessionEnded();
 
-        
         Server.PrintToChatAll($"{ChatPrefix} A partida foi finalizada. O servidor será resetado para o estado padrão.");
         Server.PrintToChatAll(" ");
 

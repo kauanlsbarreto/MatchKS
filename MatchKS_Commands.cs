@@ -7,14 +7,22 @@ using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using CounterStrikeSharp.API.Modules.Cvars;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System;
-using System.IO;
 
 namespace MatchKS;
 
 public partial class MatchKS
 {
+
+    private sealed class RoundBackupEntry
+    {
+        public int Round { get; init; }
+        public string AbsolutePath { get; init; } = string.Empty;
+        public DateTime LastWriteTimeUtc { get; init; }
+    }
 
     private bool IsInFreezetime()
     {
@@ -25,6 +33,196 @@ public partial class MatchKS
     {
         var gameRulesEntities = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules");
         return gameRulesEntities.FirstOrDefault()?.GameRules;
+    }
+
+    private string GetBackupRootPath()
+    {
+        return Path.Combine(CsgoRootPath, "BackupMatchKS");
+    }
+
+    private string GetCurrentBackupStorageKey()
+    {
+        var mapName = SanitizeFileName(Server.MapName);
+        if (_activeMatch == null)
+        {
+            return $"pug_{mapName}";
+        }
+
+        var mapNumber = _activeMatch.CurrentMapIndex + 1;
+        var team1 = SanitizeFileName(string.IsNullOrWhiteSpace(_activeMatch.Team1.Name) ? "Terroristas" : _activeMatch.Team1.Name);
+        var team2 = SanitizeFileName(string.IsNullOrWhiteSpace(_activeMatch.Team2.Name) ? "Contra-Terroristas" : _activeMatch.Team2.Name);
+        return $"m{mapNumber}_{mapName}_{team1}_vs_{team2}";
+    }
+
+    private string GetCurrentBackupDirectory()
+    {
+        return Path.Combine(GetBackupRootPath(), GetCurrentBackupStorageKey());
+    }
+
+    private static bool TryParseRoundFromBackupFileName(string fileName, out int round)
+    {
+        round = 0;
+        const string prefix = "round_";
+
+        if (!fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var suffix = fileName[prefix.Length..];
+        var separatorIndex = suffix.IndexOf('_');
+        if (separatorIndex <= 0)
+        {
+            return false;
+        }
+
+        var roundToken = suffix[..separatorIndex];
+        if (!int.TryParse(roundToken, out round))
+        {
+            return false;
+        }
+
+        return round > 0;
+    }
+
+    private static string ToCsgoRelativePath(string csgoRootPath, string absolutePath)
+    {
+        return Path.GetRelativePath(csgoRootPath, absolutePath).Replace('\\', '/');
+    }
+
+    private List<RoundBackupEntry> GetBackupsForCurrentGame()
+    {
+        var backupDirectory = GetCurrentBackupDirectory();
+        return GetBackupsFromDirectory(backupDirectory);
+    }
+
+    private List<RoundBackupEntry> GetBackupsFromDirectory(string backupDirectory)
+    {
+        if (!Directory.Exists(backupDirectory))
+        {
+            return new List<RoundBackupEntry>();
+        }
+
+        var allFiles = Directory
+            .GetFiles(backupDirectory, "round_*", SearchOption.TopDirectoryOnly)
+            .Where(path =>
+            {
+                var ext = Path.GetExtension(path);
+                return ext.Equals(".cfg", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrWhiteSpace(ext);
+            });
+
+        var backups = new List<RoundBackupEntry>();
+        foreach (var filePath in allFiles)
+        {
+            var fileName = Path.GetFileName(filePath);
+            if (!TryParseRoundFromBackupFileName(fileName, out var round))
+            {
+                continue;
+            }
+
+            backups.Add(new RoundBackupEntry
+            {
+                Round = round,
+                AbsolutePath = filePath,
+                LastWriteTimeUtc = File.GetLastWriteTimeUtc(filePath)
+            });
+        }
+
+        return backups
+            .GroupBy(b => b.Round)
+            .Select(group => group.OrderByDescending(item => item.LastWriteTimeUtc).First())
+            .OrderBy(item => item.Round)
+            .ToList();
+    }
+
+    private string? GetLatestBackupDirectory()
+    {
+        var root = GetBackupRootPath();
+        if (!Directory.Exists(root))
+        {
+            return null;
+        }
+
+        return Directory
+            .GetDirectories(root, "*", SearchOption.TopDirectoryOnly)
+            .OrderByDescending(path => Directory.GetLastWriteTimeUtc(path))
+            .FirstOrDefault();
+    }
+
+    private List<RoundBackupEntry> GetBackupsForCurrentGameOrLatest(out string sourceLabel)
+    {
+        var currentDirectory = GetCurrentBackupDirectory();
+        var currentBackups = GetBackupsFromDirectory(currentDirectory);
+        if (currentBackups.Count > 0)
+        {
+            sourceLabel = Path.GetFileName(currentDirectory);
+            return currentBackups;
+        }
+
+        var latestDirectory = GetLatestBackupDirectory();
+        if (string.IsNullOrWhiteSpace(latestDirectory))
+        {
+            sourceLabel = "";
+            return new List<RoundBackupEntry>();
+        }
+
+        var latestBackups = GetBackupsFromDirectory(latestDirectory);
+        sourceLabel = Path.GetFileName(latestDirectory);
+        return latestBackups;
+    }
+
+    private int GetCurrentRoundOneBased()
+    {
+        var teamEntities = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
+        var teamCt = teamEntities.FirstOrDefault(t => t.TeamNum == (byte)CsTeam.CounterTerrorist);
+        var teamTr = teamEntities.FirstOrDefault(t => t.TeamNum == (byte)CsTeam.Terrorist);
+
+        int roundsPlayed = (teamCt?.Score ?? 0) + (teamTr?.Score ?? 0);
+        return Math.Max(1, roundsPlayed + 1);
+    }
+
+    private void CreateRoundBackupForLiveMatch()
+    {
+        var round = GetCurrentRoundOneBased();
+        if (round <= 0)
+        {
+            return;
+        }
+
+        var backupDirectory = GetCurrentBackupDirectory();
+        if (!Directory.Exists(backupDirectory))
+        {
+            Directory.CreateDirectory(backupDirectory);
+        }
+
+        var fileName = $"round_{round:00}_{DateTime.Now:yyyyMMdd_HHmmss}.cfg";
+        var relativeBackupPath = Path.Combine("BackupMatchKS", GetCurrentBackupStorageKey(), fileName).Replace('\\', '/');
+
+        Server.ExecuteCommand($"mp_backup_round_file \"{relativeBackupPath}\"");
+        WriteSessionInfo(round);
+    }
+
+    private void PrintBackupsToPlayer(CCSPlayerController? player, List<RoundBackupEntry> backups)
+    {
+        if (player == null)
+        {
+            Server.PrintToConsole($"[MatchKS] Backups encontrados para este jogo: {backups.Count}");
+            foreach (var item in backups)
+            {
+                var relative = ToCsgoRelativePath(CsgoRootPath, item.AbsolutePath);
+                Server.PrintToConsole($"[MatchKS] Round {item.Round}: {relative}");
+            }
+            return;
+        }
+
+        player.PrintToChat($"{ChatPrefix} Backups encontrados para este jogo: {ChatColors.Green}{backups.Count}");
+        foreach (var item in backups)
+        {
+            var relative = ToCsgoRelativePath(CsgoRootPath, item.AbsolutePath);
+            player.PrintToChat($"{ChatPrefix} Round {ChatColors.Green}{item.Round}{ChatColors.Default}: {relative}");
+        }
     }
 
     [ConsoleCommand("css_map"), RequiresPermissions("@css/kick")]
@@ -269,6 +467,76 @@ public partial class MatchKS
         Server.PrintToChatAll($" {ChatColors.Red}[ADM - MatchKS]{ChatColors.Default} {message}");
     }
 
+    [ConsoleCommand("css_backups")]
+    public void OnBackupsCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        var backups = GetBackupsForCurrentGameOrLatest(out var sourceLabel);
+        if (backups.Count == 0)
+        {
+            player?.PrintToChat($"{ChatPrefix} Nenhum backup encontrado para este jogo.");
+            if (player == null)
+            {
+                Server.PrintToConsole("[MatchKS] Nenhum backup encontrado para este jogo.");
+            }
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sourceLabel))
+        {
+            player?.PrintToChat($"{ChatPrefix} Origem do backup: {ChatColors.Green}{sourceLabel}");
+        }
+
+        PrintBackupsToPlayer(player, backups);
+    }
+
+    [ConsoleCommand("css_restore"), RequiresPermissions("@css/kick")]
+    public void OnRestoreRoundCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (!_isMatchLive)
+        {
+            player?.PrintToChat($"{ChatPrefix} O restore só pode ser usado com a partida {ChatColors.Green}ao vivo{ChatColors.Default}. Dê .ready nos dois times primeiro.");
+            return;
+        }
+
+        if (command.ArgCount < 2)
+        {
+            player?.PrintToChat($"{ChatPrefix} Uso: .restore <round>");
+            return;
+        }
+
+        if (!int.TryParse(command.GetArg(1), out int roundToRestore) || roundToRestore <= 0)
+        {
+            player?.PrintToChat($"{ChatPrefix} Round inválido. Use valores começando em 1 (sem round 0).");
+            return;
+        }
+
+        var backups = GetBackupsForCurrentGameOrLatest(out var sourceLabel);
+        var targetBackup = backups.FirstOrDefault(b => b.Round == roundToRestore);
+        if (targetBackup == null)
+        {
+            var availableRounds = backups.Select(b => b.Round.ToString()).ToList();
+            if (availableRounds.Count == 0)
+            {
+                player?.PrintToChat($"{ChatPrefix} Nenhum backup disponível para restore.");
+            }
+            else
+            {
+                player?.PrintToChat($"{ChatPrefix} Backup do round {roundToRestore} não encontrado. Rounds disponíveis: {string.Join(", ", availableRounds)}");
+            }
+            return;
+        }
+
+        var relativePath = ToCsgoRelativePath(CsgoRootPath, targetBackup.AbsolutePath);
+        Server.ExecuteCommand($"mp_backup_restore_load_file \"{relativePath}\"");
+        if (!string.IsNullOrWhiteSpace(sourceLabel))
+        {
+            Server.PrintToChatAll($"{ChatPrefix} Fonte selecionada: {ChatColors.Green}{sourceLabel}{ChatColors.Default}.");
+        }
+
+        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} restaurou o backup do round {ChatColors.Green}{roundToRestore}{ChatColors.Default}.");
+        InitiateRestorePause();
+    }
+
     [ConsoleCommand("css_nometime")]
     [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
     public void OnNoTimeCommand(CCSPlayerController? player, CommandInfo command)
@@ -358,32 +626,64 @@ public partial class MatchKS
     }
 
     
-    [ConsoleCommand("css_tec"), ConsoleCommand("css_tech"), RequiresPermissions("@css/kick")]
+    [ConsoleCommand("css_tec"), ConsoleCommand("css_tech")]
     public void OnTechPauseCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (!_isMatchLive) return;
+
+        var callerTeam = player != null && player.IsValid &&
+                         (player.TeamNum == (byte)CsTeam.Terrorist || player.TeamNum == (byte)CsTeam.CounterTerrorist)
+            ? (CsTeam)player.TeamNum
+            : CsTeam.None;
         
         if (_isTechPauseActive)
         {
-            UnpauseMatch(isTechPause: true);
-        }
-        else 
-        {
-            if (_isPauseActive)
+            if (callerTeam != CsTeam.None && _techPauseTeam != CsTeam.None && callerTeam != _techPauseTeam)
             {
-                player?.PrintToChat($"{ChatPrefix} Uma pausa tática já está em andamento.");
+                player?.PrintToChat($"{ChatPrefix} Apenas o time {GetTeamName((byte)_techPauseTeam)} pode despausar esta pausa técnica.");
                 return;
             }
 
-            if (IsInFreezetime())
+            UnpauseMatch(isTechPause: true);
+            return;
+        }
+
+        if (_isTechPauseScheduled)
+        {
+            if (callerTeam != CsTeam.None && callerTeam == _techPauseScheduledTeam)
             {
-                StartTechPause();
+                _isTechPauseScheduled = false;
+                _techPauseScheduledTeam = CsTeam.None;
+                Server.PrintToChatAll($"{ChatPrefix} O time {GetTeamName((byte)callerTeam)} cancelou a pausa técnica agendada.");
             }
             else
             {
-                _isTechPauseScheduled = true;
-                Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} agendou uma pausa técnica para o próximo round.");
+                player?.PrintToChat($"{ChatPrefix} Já existe uma pausa técnica agendada.");
             }
+
+            return;
+        }
+
+        if (_isPauseActive)
+        {
+            player?.PrintToChat($"{ChatPrefix} Uma pausa tática já está em andamento.");
+            return;
+        }
+
+        if (IsInFreezetime())
+        {
+            StartTechPause(callerTeam);
+        }
+        else
+        {
+            _isTechPauseScheduled = true;
+            _techPauseScheduledTeam = callerTeam;
+
+            var requesterName = callerTeam == CsTeam.None
+                ? $"{ChatColors.Red}ADMIN{ChatColors.Default}"
+                : $"o time {GetTeamName((byte)callerTeam)}";
+
+            Server.PrintToChatAll($"{ChatPrefix} {requesterName} agendou uma pausa técnica para o próximo round.");
         }
     }
     
@@ -417,18 +717,29 @@ public partial class MatchKS
         }
     }
     
-    private void StartTechPause()
+    private void StartTechPause(CsTeam requestingTeam = CsTeam.None)
     {
+        _techPauseTeam = requestingTeam != CsTeam.None ? requestingTeam : _techPauseScheduledTeam;
+        _techPauseScheduledTeam = CsTeam.None;
         _isTechPauseActive = true;
         Server.ExecuteCommand("mp_pause_match");
-        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} pausou a partida (pausa técnica). Use {ChatColors.Green}.tec{ChatColors.Default} para despausar.");
+
+        var requesterName = _techPauseTeam == CsTeam.None
+            ? $"{ChatColors.Red}ADMIN{ChatColors.Default}"
+            : $"o time {GetTeamName((byte)_techPauseTeam)}";
+
+        var centerMessage = _techPauseTeam == CsTeam.None
+            ? "Admin, digite .tec para continuar"
+            : $"{GetTeamName((byte)_techPauseTeam)}, digite .tec para continuar";
+
+        Server.PrintToChatAll($"{ChatPrefix} {requesterName} pausou a partida (pausa técnica). Use {ChatColors.Green}.tec{ChatColors.Default} para despausar.");
         
         _pauseDisplayTimer?.Kill();
         _pauseDisplayTimer = AddTimer(1.0f, () =>
         {
             foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid))
             {
-                p.PrintToCenterHtml("<font color='orange'>PARTIDA EM PAUSA TÉCNICA</font><br><font color='white'>Admin, digite .tec para continuar</font>");
+                p.PrintToCenterHtml($"<font color='orange'>PARTIDA EM PAUSA TÉCNICA</font><br><font color='white'>{centerMessage}</font>");
             }
         }, TimerFlags.REPEAT);
     }
@@ -479,6 +790,8 @@ public partial class MatchKS
         if (isTechPause)
         {
             _isTechPauseActive = false;
+            _techPauseTeam = CsTeam.None;
+            _techPauseScheduledTeam = CsTeam.None;
             Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} despausou a partida!");
         }
         else
@@ -491,112 +804,9 @@ public partial class MatchKS
         Server.ExecuteCommand("mp_unpause_match");
     }
 
-    private bool IsReadyAdminOverride(CCSPlayerController? player)
-    {
-        if (player == null || !player.IsValid)
-        {
-            return true;
-        }
-
-        return AdminManager.PlayerHasPermissions(player, "@css/kick");
-    }
-
-    private void StartRestorePauseFlow(int targetRound)
-    {
-        _isPauseScheduled = false;
-        _isTechPauseScheduled = false;
-        _isPauseActive = false;
-        _isTechPauseActive = false;
-        _tacTimer?.Kill();
-        _pauseDisplayTimer?.Kill();
-
-        _isRestorePauseActive = true;
-        _isRestoreReadyT = false;
-        _isRestoreReadyCT = false;
-
-        AddTimer(0.6f, () =>
-        {
-            Server.ExecuteCommand("mp_pause_match");
-            Server.PrintToChatAll($"{ChatPrefix} Restore do round {ChatColors.Green}{targetRound}{ChatColors.Default} carregado e partida pausada.");
-            Server.PrintToChatAll($"{ChatPrefix} Para continuar: um jogador de cada time deve usar {ChatColors.Lime}.rrlive{ChatColors.Default}.");
-            Server.PrintToChatAll($"{ChatPrefix} Admin pode liberar direto com {ChatColors.Lime}.ready{ChatColors.Default}.");
-        });
-    }
-
-    private void ReleaseRestorePause(string actor)
-    {
-        _isRestorePauseActive = false;
-        _isRestoreReadyT = false;
-        _isRestoreReadyCT = false;
-        Server.ExecuteCommand("mp_unpause_match");
-        Server.PrintToChatAll($"{ChatPrefix} Restore confirmado por {ChatColors.Green}{actor}{ChatColors.Default}. Partida retomada!");
-    }
-
-    private void RegisterRestoreReady(CCSPlayerController player)
-    {
-        if (!_isRestorePauseActive)
-        {
-            player.PrintToChat($"{ChatPrefix} Não existe restore pendente para liberar.");
-            return;
-        }
-
-        if (player.TeamNum != (byte)CsTeam.Terrorist && player.TeamNum != (byte)CsTeam.CounterTerrorist)
-        {
-            player.PrintToChat($"{ChatPrefix} Entre em TR ou CT para confirmar o restore.");
-            return;
-        }
-
-        if (player.TeamNum == (byte)CsTeam.Terrorist)
-        {
-            if (_isRestoreReadyT)
-            {
-                player.PrintToChat($"{ChatPrefix} Seu time ja confirmou com .rrlive.");
-                return;
-            }
-
-            _isRestoreReadyT = true;
-            Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{GetTeamName((byte)CsTeam.Terrorist)}{ChatColors.Default} confirmou com .rrlive.");
-        }
-        else
-        {
-            if (_isRestoreReadyCT)
-            {
-                player.PrintToChat($"{ChatPrefix} Seu time ja confirmou com .rrlive.");
-                return;
-            }
-
-            _isRestoreReadyCT = true;
-            Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{GetTeamName((byte)CsTeam.CounterTerrorist)}{ChatColors.Default} confirmou com .rrlive.");
-        }
-
-        if (_isRestoreReadyT && _isRestoreReadyCT)
-        {
-            ReleaseRestorePause("ambos os times");
-            return;
-        }
-
-        var waitingFor = new System.Collections.Generic.List<string>();
-        if (!_isRestoreReadyT) waitingFor.Add(GetTeamName((byte)CsTeam.Terrorist));
-        if (!_isRestoreReadyCT) waitingFor.Add(GetTeamName((byte)CsTeam.CounterTerrorist));
-        Server.PrintToChatAll($"{ChatPrefix} Aguardando .rrlive de: {ChatColors.Green}{string.Join(", ", waitingFor)}");
-    }
-
     [ConsoleCommand("css_r"), ConsoleCommand("css_ready"), ConsoleCommand("css_pronto")]
     public void OnUnifiedReadyCommand(CCSPlayerController? player, CommandInfo command)
     {
-        if (_isRestorePauseActive)
-        {
-            if (IsReadyAdminOverride(player))
-            {
-                var actor = player?.IsValid == true ? player.PlayerName : "CONSOLE";
-                ReleaseRestorePause(actor);
-                return;
-            }
-
-            player?.PrintToChat($"{ChatPrefix} Apenas admin pode usar .ready para liberar restore. Use .rrlive pelo seu time.");
-            return;
-        }
-
         if (player == null || !player.IsValid || _isMatchLive) return;
 
         int teamPlayerCount = Utilities.GetPlayers().Count(p => p.TeamNum == player.TeamNum && p.IsValid && !p.IsBot && p.Connected == PlayerConnectedState.PlayerConnected);
@@ -621,131 +831,20 @@ public partial class MatchKS
         }
     }
 
-    [ConsoleCommand("css_rrlive")]
-    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
-    public void OnRestoreReadyCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (player == null || !player.IsValid) return;
-        RegisterRestoreReady(player);
-    }
-
-    [ConsoleCommand("css_backups"), RequiresPermissions("@css/kick")]
-    public void OnBackupsListCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (player == null || _activeMatch == null) return;
-        
-        var backupFiles = Directory.GetFiles(BackupFolderPath, "*.txt");
-        if (backupFiles.Length == 0)
-        {
-            player.PrintToChat($"{ChatPrefix} Nenhum arquivo de backup encontrado.");
-            return;
-        }
-
-        player.PrintToChat($"{ChatPrefix} Backups disponíveis para a partida atual:");
-
-        var team1Name = SanitizeFileName(_activeMatch.Team1.Name);
-        var team2Name = SanitizeFileName(_activeMatch.Team2.Name);
-        var mapName = SanitizeFileName(Server.MapName);
-
-        var matchIdentifier1 = $"_{team1Name}_{team2Name}_{mapName}_";
-        var matchIdentifier2 = $"_{team2Name}_{team1Name}_{mapName}_";
-
-        var matchFiles = backupFiles
-            .Where(f => {
-                var fn = Path.GetFileName(f);
-                return fn.Contains(matchIdentifier1) || fn.Contains(matchIdentifier2);
-            })
-            .OrderBy(f => f)
-            .ToList();
-
-        if (matchFiles.Count == 0)
-        {
-            player.PrintToChat(" Nenhum backup encontrado para esta partida e mapa.");
-            return;
-        }
-
-        foreach (var file in matchFiles)
-        {
-            var fn = Path.GetFileNameWithoutExtension(file);
-            var identifier = fn.Contains(matchIdentifier1) ? matchIdentifier1 : matchIdentifier2;
-            var partsAfterIdentifier = fn.Substring(fn.IndexOf(identifier) + identifier.Length).Split('_');
-
-            if (partsAfterIdentifier.Length > 0 && int.TryParse(partsAfterIdentifier[0], out int roundInFile))
-            {
-                player.PrintToChat($" Round {ChatColors.Green}{roundInFile}{ChatColors.Default}: {Path.GetFileName(file)}");
-            }
-        }
-        player.PrintToChat($"{ChatPrefix} Use {ChatColors.Green}.restore <round>{ChatColors.Default} para carregar um backup.");
-    }
-
-    
-    [ConsoleCommand("css_restore"), RequiresPermissions("@css/kick")]
-    public void OnRestoreCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (!_isMatchLive || _activeMatch == null) 
-        { 
-            player?.PrintToChat($"{MatchKS.ChatPrefix} A partida precisa estar ao vivo para restaurar um backup."); 
-            return; 
-        }
-        if (command.ArgCount < 2) 
-        { 
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Uso: .restore <round>"); 
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Use .backups para listar os rounds disponíveis."); 
-            return; 
-        }
-
-        if (!int.TryParse(command.GetArg(1), out int targetRound) || targetRound < 0)
-        {
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Número do round inválido.");
-            return;
-        }
-
-        var backupFiles = Directory.GetFiles(BackupFolderPath, "*.txt");
-        if (backupFiles.Length == 0)
-        {
-            player?.PrintToChat($"{ChatPrefix} Nenhum arquivo de backup foi encontrado no servidor.");
-            return;
-        }
-
-        var team1Name = SanitizeFileName(_activeMatch.Team1.Name);
-        var team2Name = SanitizeFileName(_activeMatch.Team2.Name);
-        var mapName = SanitizeFileName(Server.MapName);
-
-        var matchIdentifier1 = $"_{team1Name}_{team2Name}_{mapName}_";
-        var matchIdentifier2 = $"_{team2Name}_{team1Name}_{mapName}_";
-
-        var filesForRound = backupFiles.Where(file => {
-            var fn = Path.GetFileNameWithoutExtension(file);
-            var identifier = fn.Contains(matchIdentifier1) ? matchIdentifier1 : matchIdentifier2;
-
-            if (string.IsNullOrEmpty(identifier) || !fn.Contains(identifier)) return false;
-
-            var partsAfter = fn.Substring(fn.IndexOf(identifier) + identifier.Length).Split('_');
-            return partsAfter.Length > 0 && int.TryParse(partsAfter[0], out int roundInFile) && roundInFile == targetRound;
-        }).ToList();
-        
-        if (filesForRound.Count > 0)
-        {
-            var fileToRestore = filesForRound.OrderByDescending(f => f).First(); 
-            var fileNameOnly = Path.GetFileName(fileToRestore); 
-            var relativePath = Path.Join("BackupMatchKS", fileNameOnly).Replace('\\', '/');
-            
-            Server.PrintToChatAll($"{MatchKS.ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} está restaurando a partida para o backup do round {targetRound}.");
-            Server.PrintToChatAll($"{MatchKS.ChatPrefix} Carregando arquivo: {relativePath}");
-            _currentRoundBackupFile = string.Empty;
-            Server.ExecuteCommand($"mp_backup_restore_load_file \"{relativePath}\"");
-            StartRestorePauseFlow(targetRound);
-        }
-        else
-        {
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Nenhum backup encontrado para o round {targetRound} da partida atual.");
-        }
-    }
-
-
     [GameEventHandler]
     public HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
+        if (_isDemoStartPending)
+        {
+            StartDemoRecording();
+            _isDemoStartPending = false;
+        }
+
+        if (_isMatchLive && !_isKnifeRoundActive && !_isSidePickPhase)
+        {
+            CreateRoundBackupForLiveMatch();
+        }
+
         if (_isPauseScheduled)
         {
             _isPauseScheduled = false;
@@ -758,6 +857,72 @@ public partial class MatchKS
         }
 
         return HookResult.Continue;
+    }
+
+    private void InitiateRestorePause()
+    {
+        _isTeamTRestoreReady = false;
+        _isTeamCTRestoreReady = false;
+        _restoreReadyDisplayTimer?.Kill();
+
+        AddTimer(2.0f, () =>
+        {
+            _isWaitingForRestoreReady = true;
+            Server.ExecuteCommand("mp_pause_match");
+            Server.PrintToChatAll($"{ChatPrefix} Partida pausada após restore. Os dois times precisam usar {ChatColors.Green}.readyrr{ChatColors.Default} para retomar.");
+            _restoreReadyDisplayTimer = AddTimer(1.0f, UpdateRestoreReadyHud, TimerFlags.REPEAT);
+        });
+    }
+
+    private void UpdateRestoreReadyHud()
+    {
+        if (!_isWaitingForRestoreReady)
+        {
+            _restoreReadyDisplayTimer?.Kill();
+            return;
+        }
+        var trColor = _isTeamTRestoreReady ? "green" : "red";
+        var ctColor = _isTeamCTRestoreReady ? "green" : "red";
+        var trMark = _isTeamTRestoreReady ? "✓" : "?";
+        var ctMark = _isTeamCTRestoreReady ? "✓" : "?";
+        foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid))
+            p.PrintToCenterHtml(
+                $"<font color='orange'>RESTORE — CONFIRME PRONTO</font><br>" +
+                $"<font color='{trColor}'>TR {trMark}</font> | <font color='{ctColor}'>CT {ctMark}</font><br>" +
+                "<font color='white'>.readyrr para confirmar</font>");
+    }
+
+    [ConsoleCommand("css_readyrr")]
+    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    public void OnRestoreReadyCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null || !player.IsValid || !_isWaitingForRestoreReady) return;
+
+        bool changed = false;
+        if (player.TeamNum == (byte)CsTeam.Terrorist && !_isTeamTRestoreReady)
+        {
+            _isTeamTRestoreReady = true;
+            Server.PrintToChatAll($"{ChatPrefix} Time {ChatColors.Gold}TR{ChatColors.Default} confirmou pronto após restore!");
+            changed = true;
+        }
+        else if (player.TeamNum == (byte)CsTeam.CounterTerrorist && !_isTeamCTRestoreReady)
+        {
+            _isTeamCTRestoreReady = true;
+            Server.PrintToChatAll($"{ChatPrefix} Time {ChatColors.LightBlue}CT{ChatColors.Default} confirmou pronto após restore!");
+            changed = true;
+        }
+
+        if (!changed) return;
+
+        if (_isTeamTRestoreReady && _isTeamCTRestoreReady)
+        {
+            _isWaitingForRestoreReady = false;
+            _restoreReadyDisplayTimer?.Kill();
+            foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid))
+                p.PrintToCenterHtml(" ");
+            Server.ExecuteCommand("mp_unpause_match");
+            Server.PrintToChatAll($"{ChatPrefix} Ambos os times confirmaram! Partida retomada do backup.");
+        }
     }
 }
 

@@ -34,6 +34,8 @@ public class PluginConfig
     public int DuracaoPauseTatico { get; set; } = 30;
     public bool RoundFaca { get; set; } = true;
     public bool FogoAmigo { get; set; } = false;
+    public bool EnableOvertime { get; set; } = true;
+    public int OvertimeStartMoney { get; set; } = 10000;
     public string DemoNameFormat { get; set; } = "{TIME}_{MATCH_ID}_{MAP}_{TEAM1}_vs_{TEAM2}";
     public string DemoFolderPath { get; set; } = "matchksDEMOS/";
     public bool DiscordWebhookEnabled { get; set; } = true;
@@ -43,4 +45,15 @@ public class PluginConfig
 public class TeamNameOwnerConfig
 {
     public Dictionary<string, string> SteamIdToTeamName { get; set; } = new();
+}
+
+public class BackupSessionInfo
+{
+    public Dictionary<string, string> Team1Players { get; set; } = new();
+    public Dictionary<string, string> Team2Players { get; set; } = new();
+    public string Team1Name { get; set; } = "";
+    public string Team2Name { get; set; } = "";
+    public string MapName { get; set; } = "";
+    public int LastBackupRound { get; set; } = 0;
+    public bool MatchEnded { get; set; } = false;
 }

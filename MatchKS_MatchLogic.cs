@@ -120,25 +120,22 @@ public partial class MatchKS
     public HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
         if (_isMatchLive || @event.Userid == null || !@event.Userid.IsValid || _activeMatch == null)
-        {
             return HookResult.Continue;
-        }
 
         var player = @event.Userid;
         var playerTeam = (CsTeam)player.TeamNum;
 
-        if (playerTeam != CsTeam.Terrorist && playerTeam != CsTeam.CounterTerrorist)
-        {
-            return HookResult.Continue;
-        }
-
-        if (playerTeam == CsTeam.Terrorist && !_isTrNameCustom && string.IsNullOrEmpty(_activeMatch.Team1.Name))
+        if (playerTeam == CsTeam.Terrorist && !_isTrNameCustom && _trNamerSteamId == 0)
         {
             _activeMatch.Team1.Name = $"time_{player.PlayerName}";
+            _trNamerSteamId = player.SteamID;
+            Server.ExecuteCommand($"mp_teamname_2 \"{_activeMatch.Team1.Name}\"");
         }
-        else if (playerTeam == CsTeam.CounterTerrorist && !_isCtNameCustom && string.IsNullOrEmpty(_activeMatch.Team2.Name))
+        else if (playerTeam == CsTeam.CounterTerrorist && !_isCtNameCustom && _ctNamerSteamId == 0)
         {
             _activeMatch.Team2.Name = $"time_{player.PlayerName}";
+            _ctNamerSteamId = player.SteamID;
+            Server.ExecuteCommand($"mp_teamname_1 \"{_activeMatch.Team2.Name}\"");
         }
         return HookResult.Continue;
     }
@@ -203,11 +200,19 @@ public partial class MatchKS
         _isMatchLive = true;
         _isTeamChangeLocked = true;
 
-        var ffValue = _pluginConfig.FogoAmigo ? 1 : 0;
-        Server.ExecuteCommand($"mp_friendlyfire {ffValue}");
-        
+        // Sincroniza live.cfg com os valores do config.cfg antes de executar
+        SyncLiveCfgFromPluginConfig();
+
         Server.ExecuteCommand("mp_warmup_end");
         Server.ExecuteCommand("exec MatchKS/live.cfg");
+
+        // Garante que os valores do config.cfg têm prioridade, mesmo se o CFG tiver sobrescrito
+        var ffValue = _pluginConfig.FogoAmigo ? 1 : 0;
+        var otValue = (_activeMatch?.EnableOvertime ?? _pluginConfig.EnableOvertime) ? 1 : 0;
+        Server.ExecuteCommand($"mp_friendlyfire {ffValue}");
+        Server.ExecuteCommand($"mp_overtime_enable {otValue}");
+        Server.ExecuteCommand($"mp_overtime_startmoney {_pluginConfig.OvertimeStartMoney}");
+
         Server.PrintToChatAll($"{ChatPrefix} A partida está {ChatColors.Green}AO VIVO{ChatColors.Default}!");
         AddTimer(1.0f, () => Server.ExecuteCommand("mp_restartgame 1"));
         _isDemoStartPending = true;
@@ -322,8 +327,8 @@ public partial class MatchKS
             Server.PrintToChatAll($"{ChatPrefix} Os times trocaram de lado!");
         }
 
-        var team1SideName = "TR";
-        var team2SideName = "CT";
+        var team1SideName = swapSides ? "CT" : "TR";
+        var team2SideName = swapSides ? "TR" : "CT";
 
         Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{_activeMatch.Team1.Name}{ChatColors.Default} começará como {ChatColors.Gold}{team1SideName}{ChatColors.Default}.");
         Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{_activeMatch.Team2.Name}{ChatColors.Default} começará como {ChatColors.LightBlue}{team2SideName}{ChatColors.Default}.");
@@ -369,7 +374,7 @@ public partial class MatchKS
     private void AnnounceReadyStatus()
     {
         if (_isMatchLive) { _readyStatusTimer?.Kill(); return; }
-        
+
         int terroristsCount = Utilities.GetPlayers().Count(p => p.TeamNum == (byte)CsTeam.Terrorist && p.IsValid && !p.IsBot);
         int ctsCount = Utilities.GetPlayers().Count(p => p.TeamNum == (byte)CsTeam.CounterTerrorist && p.IsValid && !p.IsBot);
 
@@ -377,6 +382,30 @@ public partial class MatchKS
         if (!_isTeamTReady) { string teamName = _activeMatch?.Team1.Name ?? "TR"; if (terroristsCount < 5) waitingFor.Add($"{teamName} ({terroristsCount}/5)"); else waitingFor.Add($"{teamName} (!ready)"); }
         if (!_isTeamCTReady) { string teamName = _activeMatch?.Team2.Name ?? "CT"; if (ctsCount < 5) waitingFor.Add($"{teamName} ({ctsCount}/5)"); else waitingFor.Add($"{teamName} (!ready)"); }
         if (waitingFor.Any()) { Server.PrintToChatAll($"{MatchKS.ChatPrefix} Aguardando: {ChatColors.Gold}{string.Join(", ", waitingFor)}"); }
+    }
+
+    private void AnnounceMatchCommands()
+    {
+        var c = ChatColors.Default;
+        var p = MatchKS.ChatPrefixColor;
+
+        var knifeStatus = _isKnifeRoundEnabledForCurrentMap
+            ? $"{ChatColors.Green}SIM"
+            : $"{ChatColors.Red}NAO";
+        var ffStatus = _pluginConfig.FogoAmigo
+            ? $"{ChatColors.Red}SIM"
+            : $"{ChatColors.Green}NAO";
+        var otStatus = (_activeMatch?.EnableOvertime ?? _pluginConfig.EnableOvertime)
+            ? $"{ChatColors.Green}SIM"
+            : $"{ChatColors.Red}NAO";
+
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}━━━━━━━━━━━━━━━━━━━━━━━━━━━{c}");
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}COMANDOS DA PARTIDA{c}");
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}.ready{c} ou {p}.r{c} — marcar pronto");
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}.nometime <nome>{c} — definir nome do time");
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}.tac{c} — pausa tatica ({p}{_pluginConfig.PausesTaticoPorEquipe}{c} por time, {p}{_pluginConfig.DuracaoPauseTatico}s{c} cada)");
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} Round de faca: {knifeStatus}{c} | Fogo amigo: {ffStatus}{c} | Overtime: {otStatus}{c}");
+        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}━━━━━━━━━━━━━━━━━━━━━━━━━━━{c}");
     }
 
     private void CheckIfMatchCanStart()
@@ -409,12 +438,23 @@ public partial class MatchKS
         _isTeamTReady = false; _isTeamCTReady = false; _isMatchLive = false; _isKnifeRoundActive = false; _isPauseActive = false;
         _knifeRoundWinnerTeam = null; _team1TacPausesUsed = 0; _team2TacPausesUsed = 0; _isTeamChangeLocked = false;
         _ctNamerSteamId = 0; _trNamerSteamId = 0; _isCtNameCustom = false; _isTrNameCustom = false;
-        _isRestorePauseActive = false; _isRestoreReadyT = false; _isRestoreReadyCT = false;
         _isSidePickPhase = false;
         _isSideSwapPending = false;
         _sidePickCountdown = 0;
         _sidePickTimer?.Kill();
         _sidePickDisplayTimer?.Kill();
+        _isPauseScheduled = false;
+        _isTechPauseScheduled = false;
+        _isTechPauseActive = false;
+        _pausingTeam = null;
+        _techPauseTeam = CsTeam.None;
+        _techPauseScheduledTeam = CsTeam.None;
+        _tacTimer?.Kill();
+        _pauseDisplayTimer?.Kill();
+        _isWaitingForRestoreReady = false;
+        _isTeamTRestoreReady = false;
+        _isTeamCTRestoreReady = false;
+        _restoreReadyDisplayTimer?.Kill();
     }
     private void UpdateTeamNames()
     {
