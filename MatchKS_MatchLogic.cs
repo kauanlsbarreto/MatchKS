@@ -13,19 +13,85 @@ using System;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Memory;
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
 
 namespace MatchKS;
 
 public partial class MatchKS
 {
 
-
-    
     [GameEventHandler]
     public HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
-        return HookResult.Continue;
+            var player = @event.Userid;
+            if (player == null || !player.IsValid || player.IsBot)
+                return HookResult.Continue;
+
+            if (_isDemoRecording)
+                return HookResult.Continue;
+
+            return HookResult.Continue;
     }
+        private bool _isDemoRecording = false;
+        private string? _currentDemoName = null;
+
+        private void StartDemoRecording()
+        {
+            try
+            {
+                if (ConVar.Find("tv_enable")?.GetPrimitiveValue<bool>() == false)
+                {
+                    Server.ExecuteCommand("tv_enable 1");
+                }
+
+                var date = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                var map = SanitizeFileName(Server.MapName);
+                
+                var t1Name = SanitizeFileName(_activeMatch?.Team1.Name ?? "Team1").Replace(" ", "_");
+                var t2Name = SanitizeFileName(_activeMatch?.Team2.Name ?? "Team2").Replace(" ", "_");
+                
+                var demoName = $"MatchKS_{t1Name}_vs_{t2Name}_{map}_{date}";
+                _currentDemoName = demoName;
+                _isDemoRecording = true;
+                Server.ExecuteCommand($"tv_record \"{demoName}\"");
+                Server.PrintToChatAll($"{MatchKS.ChatPrefix} Gravação da demo iniciada.");
+                _ = SendDiscordWebhookAsync($"Demo iniciada: {demoName}.dem");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[MatchKS] Erro ao iniciar gravação da demo: {ex.Message}");
+            }
+        }
+
+        private void StopDemoRecording()
+        {
+            if (!_isDemoRecording) return;
+            _isDemoRecording = false;
+            Server.ExecuteCommand("tv_stoprecord");
+            Server.PrintToChatAll($"{MatchKS.ChatPrefix} Gravação da demo finalizada.");
+            if (!string.IsNullOrEmpty(_currentDemoName))
+            {
+                _ = SendDiscordWebhookAsync($"Demo finalizada: {_currentDemoName}.dem");
+            }
+            _currentDemoName = null;
+        }
+
+        private async Task SendDiscordWebhookAsync(string message)
+        {
+            try
+            {
+                using var client = new HttpClient();
+                var content = new StringContent($"{{\"content\":\"{message}\"}}", Encoding.UTF8, "application/json");
+                await client.PostAsync("https://discord.com/api/webhooks/1485935523330654278/zZmm2qYYVM2i5p6Et8mlz07K97oJ4fl04ckqNi4W5MuedvEcO6A2gf_czzIJgd_3lycJ", content);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[MatchKS] Erro ao enviar webhook Discord: {ex.Message}");
+            }
+            await Task.CompletedTask;
+        }
     public HookResult OnPlayerTeamChange(EventPlayerTeam @event, GameEventInfo info)
     {
         var newTeam = (CsTeam)@event.Team;
@@ -51,6 +117,12 @@ public partial class MatchKS
     private void StartMatch()
     {
         if (_isMatchLive) return;
+        
+        _isTechPauseActive = false;
+        _techPausePauserSteamId = 0;
+        _techPauseVoteTR = false;
+        _techPauseVoteCT = false;
+
         _isMatchLive = true;
 
         SyncLiveCfgFromPluginConfig();
@@ -63,7 +135,9 @@ public partial class MatchKS
         Server.ExecuteCommand($"mp_friendlyfire {ffValue}");
         Server.ExecuteCommand($"mp_overtime_enable {otValue}");
         Server.ExecuteCommand($"mp_overtime_startmoney {_pluginConfig.OvertimeStartMoney}");
+        UpdateTeamNamesCvars();
 
+        SaveActiveMatchState(); // Salva o estado da partida (active_match.json) assim que vai ao vivo
         Server.PrintToChatAll($"{ChatPrefix} A partida está {ChatColors.Green}AO VIVO{ChatColors.Default}!");
         AddTimer(1.0f, () => Server.ExecuteCommand("mp_restartgame 1"));
     }
@@ -94,6 +168,9 @@ public partial class MatchKS
     {
         if (_isMatchLive) return;
 
+        // Inicia a gravação da demo agora (Seja Knife ou Direto)
+        StartDemoRecording();
+
         if (_isKnifeRoundEnabledForCurrentMap)
         {
             StartKnifeRound();
@@ -106,6 +183,7 @@ public partial class MatchKS
     }
     private void StartSidePickPhase()
     {
+        _isSwitchingSides = false;
         _isSidePickPhase = true;
         _isSideSwapPending = false;
         _sidePickCountdown = 60;
@@ -152,6 +230,7 @@ public partial class MatchKS
         
         HandleSidePickDecision(swapSides: false);
     }
+    private bool _isSwitchingSides = false;
 
     public void HandleSidePickDecision(bool swapSides)
     {
@@ -171,14 +250,21 @@ public partial class MatchKS
 
         if (swapSides)
         {
+            _isSwitchingSides = true;
             ApplyTrackedSideSwap();
             _isSideSwapPending = false;
             Server.ExecuteCommand("mp_swapteams");
+
+            // Removemos a atualização manual aqui. Deixamos o proprio jogo inverter os nomes visuais com o mp_swapteams.
+            
+            AddTimer(1.0f, () => _isSwitchingSides = false);
             Server.PrintToChatAll($"{ChatPrefix} Os times trocaram de lado!");
         }
 
-        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{_activeMatch.Team1.Name}{ChatColors.Default} começará como {ChatColors.Gold}TR{ChatColors.Default}.");
-        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{_activeMatch.Team2.Name}{ChatColors.Default} começará como {ChatColors.LightBlue}CT{ChatColors.Default}.");
+        var trName = !_teamsSideSwapped ? _activeMatch.Team1.Name : _activeMatch.Team2.Name;
+        var ctName = !_teamsSideSwapped ? _activeMatch.Team2.Name : _activeMatch.Team1.Name;
+        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{trName}{ChatColors.Default} começará como {ChatColors.Gold}TR{ChatColors.Default}.");
+        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{ctName}{ChatColors.Default} começará como {ChatColors.LightBlue}CT{ChatColors.Default}.");
 
         AddTimer(1.5f, () => {
             Server.ExecuteCommand("mp_unpause_match");
@@ -201,18 +287,7 @@ public partial class MatchKS
     {
         if (_activeMatch == null) return;
 
-        // Não troca Team1/Team2, apenas ajusta estados de pausa se necessário
-        if (_pausingTeam == CsTeam.Terrorist) _pausingTeam = CsTeam.CounterTerrorist;
-        else if (_pausingTeam == CsTeam.CounterTerrorist) _pausingTeam = CsTeam.Terrorist;
-
-        if (_pausingTeamScheduled == CsTeam.Terrorist) _pausingTeamScheduled = CsTeam.CounterTerrorist;
-        else if (_pausingTeamScheduled == CsTeam.CounterTerrorist) _pausingTeamScheduled = CsTeam.Terrorist;
-
-        if (_techPauseTeam == CsTeam.Terrorist) _techPauseTeam = CsTeam.CounterTerrorist;
-        else if (_techPauseTeam == CsTeam.CounterTerrorist) _techPauseTeam = CsTeam.Terrorist;
-
-        if (_techPauseScheduledTeam == CsTeam.Terrorist) _techPauseScheduledTeam = CsTeam.CounterTerrorist;
-        else if (_techPauseScheduledTeam == CsTeam.CounterTerrorist) _techPauseScheduledTeam = CsTeam.Terrorist;
+        _teamsSideSwapped = !_teamsSideSwapped;
     }
 
     private void SwapTeams(MatchTeam team, CsTeam side)
@@ -229,8 +304,22 @@ public partial class MatchKS
 
     private string GetTeamName(byte teamNum)
     {
-        if (teamNum == (byte)CsTeam.Terrorist) return _activeMatch?.Team1.Name ?? "Terroristas";
-        if (teamNum == (byte)CsTeam.CounterTerrorist) return _activeMatch?.Team2.Name ?? "Contra-Terroristas";
+        // Se houve troca de lados (Swap), a logica inverte:
+        // O Team1 (Originalmente TR) agora esta jogando de CT
+        // O Team2 (Originalmente CT) agora esta jogando de TR
+
+        if (teamNum == (byte)CsTeam.Terrorist) // Lado TR
+        {
+            // Se nao trocou, retorna Team1. Se trocou, retorna Team2.
+            return !_teamsSideSwapped ? (_activeMatch?.Team1.Name ?? "Terroristas") : (_activeMatch?.Team2.Name ?? "Contra-Terroristas");
+        }
+        
+        if (teamNum == (byte)CsTeam.CounterTerrorist) // Lado CT
+        {
+            // Se nao trocou, retorna Team2. Se trocou, retorna Team1.
+            return !_teamsSideSwapped ? (_activeMatch?.Team2.Name ?? "Contra-Terroristas") : (_activeMatch?.Team1.Name ?? "Terroristas");
+        }
+
         return "Desconhecido";
     }
 
@@ -265,8 +354,6 @@ public partial class MatchKS
         Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}━━━━━━━━━━━━━━━━━━━━━━━━━━━{c}");
         Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}COMANDOS DA PARTIDA{c}");
         Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}.ready{c} ou {p}.r{c} — marcar pronto");
-        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}.nometime <nome>{c} — definir nome do time");
-        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}.tac{c} — pausa tatica ({p}{_pluginConfig.PausesTaticoPorEquipe}{c} por time, {p}{_pluginConfig.DuracaoPauseTatico}s{c} cada)");
         Server.PrintToChatAll($"{MatchKS.ChatPrefix} Round de faca: {knifeStatus}{c} | Fogo amigo: {ffStatus}{c} | Overtime: {otStatus}{c}");
         Server.PrintToChatAll($"{MatchKS.ChatPrefix} {p}━━━━━━━━━━━━━━━━━━━━━━━━━━━{c}");
     }
@@ -298,27 +385,20 @@ public partial class MatchKS
 
     private void ResetMapStates()
     {
-        _isTeamTReady = false; _isTeamCTReady = false; _isMatchLive = false; _isKnifeRoundActive = false; _isPauseActive = false;
+        _isTeamTReady = false; _isTeamCTReady = false; _isMatchLive = false; _isKnifeRoundActive = false;
         _knifeRoundWinnerTeam = null;
-        _team1TacPausesUsed = 0; // Reset only on new map
-        _team2TacPausesUsed = 0; // Reset only on new map
-        // removed custom team name owner logic
         _isSidePickPhase = false;
         _isSideSwapPending = false;
         _sidePickCountdown = 0;
         _sidePickTimer?.Kill();
         _sidePickDisplayTimer?.Kill();
-        _isPauseScheduled = false;
-        _isTechPauseScheduled = false;
         _isTechPauseActive = false;
-        _pausingTeam = null;
-        _pausingTeamScheduled = CsTeam.None;
-        _techPauseTeam = CsTeam.None;
-        _techPauseScheduledTeam = CsTeam.None;
-        _pauseCountdown = 0;
+        _techPausePauserSteamId = 0;
+        _techPauseVoteTR = false;
+        _techPauseVoteCT = false;
+        _teamsSideSwapped = false;
 
         _autoSideSwapWindowTimer?.Kill();
-        _tacTimer?.Kill();
         _pauseDisplayTimer?.Kill();
         _isWaitingForRestoreReady = false;
         _isTeamTRestoreReady = false;
@@ -331,5 +411,12 @@ public partial class MatchKS
     {
         var gameType = ConVar.Find("game_type"); var gameMode = ConVar.Find("game_mode");
         if (gameType == null || gameMode == null || gameType.GetPrimitiveValue<int>() != 0 || gameMode.GetPrimitiveValue<int>() != 1) { Server.PrintToChatAll($"{MatchKS.ChatPrefix} O jogo não está no modo competitivo!"); }
+    }
+
+    [GameEventHandler]
+    public HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
+    {
+        if (_isMatchLive) CreateRoundBackupForLiveMatch();
+        return HookResult.Continue;
     }
 }

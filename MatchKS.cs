@@ -59,21 +59,15 @@ public partial class MatchKS : BasePlugin
     private bool _isTeamTReady, _isTeamCTReady, _isMatchLive, _isKnifeRoundEnabledForCurrentMap, _isKnifeRoundActive;
     // Removido: _isTeamChangeLocked não é mais usado
     private CsTeam? _knifeRoundWinnerTeam;
-    private int _team1TacPausesUsed, _team2TacPausesUsed;
     private bool _isSkinCheckerEnabled = false;
 
-    private bool _isPauseActive;
-    private CsTeam? _pausingTeam;
-    private bool _isPauseScheduled = false;
-    private CsTeam _pausingTeamScheduled = CsTeam.None;
-    private Timer? _tacTimer;
     private Timer? _pauseDisplayTimer;
-    private int _pauseCountdown;
 
     private bool _isTechPauseActive = false;
-    private bool _isTechPauseScheduled = false;
-    private CsTeam _techPauseTeam = CsTeam.None;
-    private CsTeam _techPauseScheduledTeam = CsTeam.None;
+    private ulong _techPausePauserSteamId = 0; // SteamID de quem pausou
+    private string _techPausePauserName = ""; // Nome cacheado para exibição
+    private bool _techPauseVoteTR = false;
+    private bool _techPauseVoteCT = false;
 
 
     private bool _mapLogicHasRun = false;
@@ -94,6 +88,9 @@ public partial class MatchKS : BasePlugin
     private bool _isTeamCTRestoreReady = false;
     private Timer? _restoreReadyDisplayTimer;
 
+    // Armazena a pasta de backup selecionada por cada admin (SteamID -> Caminho da Pasta)
+    private readonly Dictionary<ulong, string> _adminSelectedBackupFolder = new();
+
     public override void Load(bool hotReload)
     {
         Logger.LogInformation($"[MatchKS DEBUG] Carregando Plugin v{ModuleVersion}...");
@@ -108,6 +105,7 @@ public partial class MatchKS : BasePlugin
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeamChange);
         RegisterEventHandler<EventGameEnd>(OnGameEnd);
         RegisterEventHandler<EventCsWinPanelMatch>(OnMatchWinPanel);
+        RegisterEventHandler<EventRoundStart>(OnRoundStart);
 
         Logger.LogInformation("[MatchKS DEBUG] Eventos do jogo registrados com sucesso.");
 
@@ -135,14 +133,13 @@ public partial class MatchKS : BasePlugin
         {
             var defaultConfigLines = new List<string>
             {
-                $"PausesTaticoPorEquipe={_pluginConfig.PausesTaticoPorEquipe}",
-                $"DuracaoPauseTatico={_pluginConfig.DuracaoPauseTatico}",
                 $"RoundFaca={(_pluginConfig.RoundFaca ? "true" : "false")}",
                 $"FogoAmigo={(_pluginConfig.FogoAmigo ? "true" : "false")}",
                 $"EnableOvertime={(_pluginConfig.EnableOvertime ? "true" : "false")}",
                 $"OvertimeStartMoney={_pluginConfig.OvertimeStartMoney}",
                 $"ChatPrefixText=\"{ChatPrefixText}\"",
                 "ChatPrefixColor=\"blue\"",
+                "maps=\"ancient, anubis, dust2, inferno, mirage, nuke, vertigo\"",
                 $"discord_webhook_enabled={(_pluginConfig.DiscordWebhookEnabled ? "true" : "false")}",
                 $"discord_webhook_url=\"{_pluginConfig.DiscordWebhookUrl}\""
             };
@@ -165,14 +162,6 @@ public partial class MatchKS : BasePlugin
             }
         }
 
-        if (configDict.TryGetValue("PausesTaticoPorEquipe", out var pauses) && int.TryParse(pauses, out var pausesValue))
-        {
-            _pluginConfig.PausesTaticoPorEquipe = pausesValue;
-        }
-        if (configDict.TryGetValue("DuracaoPauseTatico", out var duracao) && int.TryParse(duracao, out var duracaoValue))
-        {
-            _pluginConfig.DuracaoPauseTatico = duracaoValue;
-        }
         if (configDict.TryGetValue("RoundFaca", out var faca) && bool.TryParse(faca, out var facaValue))
         {
             _pluginConfig.RoundFaca = facaValue;
@@ -205,6 +194,23 @@ public partial class MatchKS : BasePlugin
         {
             _pluginConfig.DiscordWebhookUrl = webhookUrl.Trim();
         }
+        if (configDict.TryGetValue("maps", out var mapsLine) && !string.IsNullOrWhiteSpace(mapsLine))
+        {
+            _pluginConfig.MapRotation.Clear();
+            var maps = mapsLine.Split(',');
+            foreach (var m in maps)
+            {
+                var cleanMap = m.Trim().ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(cleanMap)) continue;
+
+                if (!cleanMap.StartsWith("de_"))
+                {
+                    cleanMap = "de_" + cleanMap;
+                }
+                _pluginConfig.MapRotation.Add(cleanMap);
+            }
+        }
+
         Logger.LogInformation("[MatchKS] Configurações carregadas do arquivo config.cfg.");
     }
 
@@ -242,22 +248,13 @@ public partial class MatchKS : BasePlugin
         _isTeamTReady = false;
         _isTeamCTReady = false;
         _knifeRoundWinnerTeam = null;
-        _team1TacPausesUsed = 0;
-        _team2TacPausesUsed = 0;
-
-        _isPauseActive = false;
-        _isPauseScheduled = false;
         _isTechPauseActive = false;
-        _isTechPauseScheduled = false;
-        _pausingTeam = null;
-        _pausingTeamScheduled = CsTeam.None;
-        _techPauseTeam = CsTeam.None;
-        _techPauseScheduledTeam = CsTeam.None;
-        _pauseCountdown = 0;
+        _techPausePauserSteamId = 0;
+        _techPauseVoteTR = false;
+        _techPauseVoteCT = false;
 
         _sidePickTimer?.Kill();
         _sidePickDisplayTimer?.Kill();
-        _tacTimer?.Kill();
         _pauseDisplayTimer?.Kill();
         _isWaitingForRestoreReady = false;
         _isTeamTRestoreReady = false;
@@ -284,7 +281,11 @@ public partial class MatchKS : BasePlugin
     {
         _mapLogicHasRun = false;
 
-        AddTimer(1.0f, () => Server.ExecuteCommand("exec MatchKS/warmup.cfg"));
+        AddTimer(1.0f, () => {
+            Server.ExecuteCommand("mp_unpause_match");
+            Server.ExecuteCommand("mp_warmup_start");
+            Server.ExecuteCommand("exec MatchKS/warmup.cfg");
+        });
         AddTimer(2.0f, RunMapStartLogic);
         AddTimer(3.0f, AnnounceReadyStatus);
         AddTimer(15.2f, AnnounceMatchCommands);
@@ -404,6 +405,9 @@ public partial class MatchKS : BasePlugin
     public HookResult OnMapShutdownHandler(EventMapShutdown @event, GameEventInfo info)
     {
         FinalizeCurrentMapArtifacts();
+        try { StopDemoRecording(); } catch { }
+        _isDemoRecording = false;
+        _currentDemoName = null;
         _mapLogicHasRun = false;
         return HookResult.Continue;
     }
@@ -523,6 +527,20 @@ public partial class MatchKS : BasePlugin
         catch (Exception ex)
         {
             Logger.LogError($"[MatchKS] Erro ao verificar/criar CFGs padrão: {ex.Message}");
+        }
+    }
+
+    private void SaveActiveMatchState()
+    {
+        if (_activeMatch == null) return;
+        try
+        {
+            var json = JsonSerializer.Serialize(_activeMatch, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(ActiveMatchFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"[MatchKS] Erro ao salvar active_match.json: {ex.Message}");
         }
     }
 
@@ -689,8 +707,10 @@ public partial class MatchKS : BasePlugin
         if (!_isMatchLive)
         {
             Server.PrintToChatAll($"{ChatPrefix} Mapa encerrado. Voltando ao estado de aquecimento.");
-            ResetMatchState();
-            ReinitializeWarmupState();
+            AddTimer(5.0f, () => {
+                ResetMatchState();
+                ReinitializeWarmupState();
+            });
             return;
         }
 
@@ -713,6 +733,7 @@ public partial class MatchKS : BasePlugin
 
     private void EndFullMatch(string? reason)
     {
+        try { StopDemoRecording(); } catch { }
         WriteMatchSummaryFile(reason);
 
         Server.PrintToChatAll(" ");
@@ -724,25 +745,66 @@ public partial class MatchKS : BasePlugin
         
         MarkSessionEnded();
 
-        Server.PrintToChatAll($"{ChatPrefix} A partida foi finalizada. O servidor será resetado para o estado padrão.");
-        Server.PrintToChatAll(" ");
-
-        ResetMatchState();
-        _activeMatch = null;
-        
-        if (File.Exists(ActiveMatchFilePath))
+        // Verifica se ha rotacao de mapas configurada
+        string? nextMap = null;
+        if (_pluginConfig.MapRotation != null && _pluginConfig.MapRotation.Count > 0)
         {
-            try
-            {
-                File.Delete(ActiveMatchFilePath);
-            }
-            catch (Exception e)
-            {
-                Logger.LogError($"[MatchKS] Não foi possível deletar o arquivo active_match.json: {e.Message}");
-            }
+            var currentMap = Server.MapName.ToLowerInvariant();
+            int currentIndex = _pluginConfig.MapRotation.IndexOf(currentMap);
+            
+            // Se achou o mapa atual, pega o proximo. Se nao achou, pega o primeiro.
+            int nextIndex = (currentIndex == -1) ? 0 : (currentIndex + 1) % _pluginConfig.MapRotation.Count;
+            nextMap = _pluginConfig.MapRotation[nextIndex];
         }
 
-        ReinitializeWarmupState();
+        if (!string.IsNullOrEmpty(nextMap))
+        {
+            Server.PrintToChatAll($"{ChatPrefix} A partida foi finalizada.");
+            Server.PrintToChatAll($"{ChatPrefix} Próximo mapa: {ChatColors.Green}{nextMap}{ChatColors.Default}");
+            Server.PrintToChatAll($"{ChatPrefix} Trocando de mapa em {ChatColors.Gold}60 segundos{ChatColors.Default} (Times serão mantidos)...");
+            
+            // Salva o estado atual (times, capitaes, etc) para carregar no proximo mapa
+            SaveActiveMatchState();
+
+            _isMatchLive = false;
+
+            AddTimer(60.0f, () =>
+            {
+                Server.ExecuteCommand($"changelevel {nextMap}");
+            });
+        }
+        else
+        {
+            // Comportamento padrao (sem rotacao ou fim de lista)
+            Server.PrintToChatAll($"{ChatPrefix} A partida foi finalizada. O placar será exibido por 15 segundos antes do reset.");
+            Server.PrintToChatAll(" ");
+
+            // Define como false imediatamente para bloquear comandos de partida enquanto exibe o placar
+            _isMatchLive = false;
+
+            // Delay para permitir que o placar final apareça (evita "Partida Cancelada" imediata)
+            AddTimer(15.0f, () =>
+            {
+                ResetMatchState();
+                _activeMatch = null;
+                
+                if (File.Exists(ActiveMatchFilePath))
+                {
+                    try
+                    {
+                        File.Delete(ActiveMatchFilePath);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.LogError($"[MatchKS] Não foi possível deletar o arquivo active_match.json: {e.Message}");
+                    }
+                }
+
+                ReinitializeWarmupState();
+            });
+        }
+        
+        Server.PrintToChatAll(" ");
     }
 
 }

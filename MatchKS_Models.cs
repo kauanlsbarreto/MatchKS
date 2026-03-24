@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+﻿﻿using System.Collections.Generic;
 
 namespace MatchKS;
 
@@ -16,19 +16,19 @@ public class MatchTeam
 {
     public string Name { get; set; } = "";
     public string Tag { get; set; } = "";
+    public ulong CaptainSteamId { get; set; } = 0;
     public Dictionary<string, string> Players { get; set; } = new();
 }
 
 public class PluginConfig
 {
-    public int PausesTaticoPorEquipe { get; set; } = 4;
-    public int DuracaoPauseTatico { get; set; } = 30;
     public bool RoundFaca { get; set; } = true;
     public bool FogoAmigo { get; set; } = false;
     public bool EnableOvertime { get; set; } = true;
     public int OvertimeStartMoney { get; set; } = 10000;
     public bool DiscordWebhookEnabled { get; set; } = true;
     public string DiscordWebhookUrl { get; set; } = "https://discord.com/api/webhooks/1482129508742992052/X2U0Yq_gA3lBrotz40tl2evBNrOusZ7SiZ6LwmrQZ2-GcTZ-FL-KHSRjhZD8r5xEOyV-";
+    public List<string> MapRotation { get; set; } = new();
 }
 
 public class TeamNameOwnerConfig

@@ -13,7 +13,7 @@ public partial class MatchKS
 {
     private readonly HttpClient _httpClient = new();
 
-    private async Task SendMapStatsToDiscordAsync(List<PlayerStatsRow> rows, int roundsPlayed)
+    private async Task SendMapStatsToDiscordAsync(List<PlayerStatsRow> rows, int roundsPlayed, string trName, int trScore, string ctName, int ctScore)
     {
         if (!_pluginConfig.DiscordWebhookEnabled) return;
         if (string.IsNullOrWhiteSpace(_pluginConfig.DiscordWebhookUrl)) return;
@@ -23,6 +23,7 @@ public partial class MatchKS
             var lines = new List<string>
             {
                 $"Mapa: {Server.MapName}",
+                $"Placar Final: {trName} ({trScore}) vs {ctName} ({ctScore})",
                 $"Rounds: {roundsPlayed}",
                 string.Empty,
                 "Team | Player | K | D | K/D | K/R | ADR"

@@ -50,8 +50,10 @@ public partial class MatchKS
 
             int trScore = teamTr?.Score ?? 0;
             int ctScore = teamCt?.Score ?? 0;
-            int team1Score = _activeMatch.Team1.Name == GetTeamName((byte)CsTeam.Terrorist) ? trScore : ctScore;
-            int team2Score = _activeMatch.Team2.Name == GetTeamName((byte)CsTeam.CounterTerrorist) ? ctScore : trScore;
+
+            // Pega o nome do time que terminou em cada lado
+            string trName = GetTeamName((byte)CsTeam.Terrorist);
+            string ctName = GetTeamName((byte)CsTeam.CounterTerrorist);
 
             var fileName = $"match_end_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{SanitizeFileName(Server.MapName)}.txt";
             var fullPath = Path.Combine(MatchSummaryFolderPath, fileName);
@@ -61,10 +63,10 @@ public partial class MatchKS
                 $"Data={DateTime.Now:yyyy-MM-dd HH:mm:ss}",
                 $"Motivo={(string.IsNullOrWhiteSpace(reason) ? "Nao informado" : reason)}",
                 $"Mapa={Server.MapName}",
-                $"Team1={_activeMatch.Team1.Name}",
-                $"Team2={_activeMatch.Team2.Name}",
-                $"ScoreTeam1={team1Score}",
-                $"ScoreTeam2={team2Score}",
+                $"TeamTR={trName}",
+                $"ScoreTR={trScore}",
+                $"TeamCT={ctName}",
+                $"ScoreCT={ctScore}",
             };
 
             File.WriteAllLines(fullPath, lines);
@@ -90,7 +92,13 @@ public partial class MatchKS
             var teamEntities = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
             var teamCt = teamEntities.FirstOrDefault(t => t.TeamNum == (byte)CsTeam.CounterTerrorist);
             var teamTr = teamEntities.FirstOrDefault(t => t.TeamNum == (byte)CsTeam.Terrorist);
-            int roundsPlayed = Math.Max(1, (teamCt?.Score ?? 0) + (teamTr?.Score ?? 0));
+            
+            int trScore = teamTr?.Score ?? 0;
+            int ctScore = teamCt?.Score ?? 0;
+            int roundsPlayed = Math.Max(1, trScore + ctScore);
+
+            string trName = GetTeamName((byte)CsTeam.Terrorist);
+            string ctName = GetTeamName((byte)CsTeam.CounterTerrorist);
 
             var rows = new List<PlayerStatsRow>();
             var players = Utilities.GetPlayers()
@@ -143,7 +151,7 @@ public partial class MatchKS
 
             File.WriteAllLines(fullPath, output);
             Logger.LogInformation($"[MatchKS] Stats do mapa salvos em: {fullPath}");
-            _ = SendMapStatsToDiscordAsync(rows, roundsPlayed);
+            _ = SendMapStatsToDiscordAsync(rows, roundsPlayed, trName, trScore, ctName, ctScore);
         }
         catch (Exception ex)
         {
