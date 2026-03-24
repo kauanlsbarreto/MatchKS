@@ -48,7 +48,7 @@ public partial class MatchKS
             return $"pug_{mapName}";
         }
 
-        var mapNumber = _activeMatch.CurrentMapIndex + 1;
+        var mapNumber = 1;
         var team1 = SanitizeFileName(string.IsNullOrWhiteSpace(_activeMatch.Team1.Name) ? "Terroristas" : _activeMatch.Team1.Name);
         var team2 = SanitizeFileName(string.IsNullOrWhiteSpace(_activeMatch.Team2.Name) ? "Contra-Terroristas" : _activeMatch.Team2.Name);
         return $"m{mapNumber}_{mapName}_{team1}_vs_{team2}";
@@ -235,13 +235,12 @@ public partial class MatchKS
         }
 
         var mapName = command.GetArg(1);
-        
+
         AddTimer(0.5f, () =>
         {
             Server.PrintToChatAll($"{MatchKS.ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} está trocando o mapa para {ChatColors.Green}{mapName}{ChatColors.Default}.");
+            Server.ExecuteCommand($"changelevel \"{mapName}\"");
         });
-
-        Server.ExecuteCommand($"changelevel \"{mapName}\"");
     }
 
     [ConsoleCommand("css_kill"), RequiresPermissions("@css/kick")]
@@ -311,56 +310,7 @@ public partial class MatchKS
     }
 
 
-    [ConsoleCommand("css_time1"), CommandHelper(minArgs: 1, usage: "<nome>")]
-    [RequiresPermissions("@css/kick")]
-    public void OnSetTeam1NameCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (_activeMatch == null)
-        {
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Nenhuma partida está ativa/configurada.");
-            return;
-        }
 
-        var teamName = command.ArgString.Split(' ', 2).Length > 1 ? command.ArgString.Split(' ', 2)[1].Trim() : command.GetArg(1);
-
-        if (string.IsNullOrEmpty(teamName))
-        {
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Uso: !time1 <nome>");
-            return;
-        }
-
-        _activeMatch.Team2.Name = teamName; 
-        Server.ExecuteCommand($"mp_teamname_1 \"{teamName}\""); 
-
-
-        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} definiu o time {ChatColors.LightBlue}CT (time1){ChatColors.Default} para: {ChatColors.LightBlue}{teamName}");
-        CheckIfMatchCanStart();
-    }
-
-    [ConsoleCommand("css_time2"), CommandHelper(minArgs: 1, usage: "<nome>")] 
-    [RequiresPermissions("@css/kick")]
-    public void OnSetTeam2NameCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (_activeMatch == null)
-        {
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Nenhuma partida está ativa/configurada.");
-            return;
-        }
-
-        var teamName = command.ArgString.Split(' ', 2).Length > 1 ? command.ArgString.Split(' ', 2)[1].Trim() : command.GetArg(1);
-
-        if (string.IsNullOrEmpty(teamName))
-        {
-            player?.PrintToChat($"{MatchKS.ChatPrefix} Uso: !time2 <nome>");
-            return;
-        }
-
-        _activeMatch.Team1.Name = teamName;
-        Server.ExecuteCommand($"mp_teamname_2 \"{teamName}\"");
-
-        Server.PrintToChatAll($"{MatchKS.ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} definiu o time {ChatColors.Gold}TR (time2){ChatColors.Default} para: {ChatColors.Gold}{teamName}");
-        CheckIfMatchCanStart();
-    }
 
     [ConsoleCommand("css_config")]
     public void OnMatchConfigCommand(CCSPlayerController? player, CommandInfo command)
@@ -370,30 +320,28 @@ public partial class MatchKS
             player?.PrintToChat($"{MatchKS.ChatPrefix} Nenhuma partida está ativa/configurada.");
             return;
         }
-        
-        string roundsParaGanhar = "Não Definido";
-        int boX = _activeMatch.MapList.Count; 
-        if (boX > 0)
-        {
-            int mapsToWin = (boX / 2) + 1;
-            roundsParaGanhar = $"{mapsToWin} mapa(s) (Série Bo{boX})";
-        }
+
+        string roundsParaGanhar = "13 rounds (padrão)";
+
+        string matchState = _isMatchLive
+            ? $"{ChatColors.Green}AO VIVO"
+            : $"{ChatColors.Yellow}AQUECIMENTO";
 
         string overtimeStatus = _activeMatch.EnableOvertime ? $"{ChatColors.Green}Liberado" : $"{ChatColors.Red}Bloqueado";
-
-        var tvAutoRecordCvar = ConVar.Find("tv_autorecord");
-        string demoStatus = tvAutoRecordCvar != null && tvAutoRecordCvar.GetPrimitiveValue<bool>()
-                            ? $"{ChatColors.Green}SIM (tv_autorecord 1)"
-                            : $"{ChatColors.Red}NÃO (tv_autorecord 0)";
+        string knifeStatus = _isKnifeRoundEnabledForCurrentMap ? $"{ChatColors.Green}SIM" : $"{ChatColors.Red}NAO";
+        string ffStatus = _pluginConfig.FogoAmigo ? $"{ChatColors.Red}SIM" : $"{ChatColors.Green}NAO";
 
         string configDisplay = $"{ChatColors.Default}================== {ChatColors.Yellow}CONFIGURAÇÃO DO MATCH{ChatColors.Default} ==================\r\n" +
-                               $"{ChatColors.Default}  • Modo de Jogo: {ChatColors.Yellow}{_activeMatch.GameMode}{ChatColors.Default}\r\n" +
-                               $"{ChatColors.Default}  • Rounds para Vencer a Série: {ChatColors.Yellow}{roundsParaGanhar}{ChatColors.Default}\r\n" +
-                               $"{ChatColors.Default}  • Overtime: {overtimeStatus}{ChatColors.Default}\r\n" +
-                               $"{ChatColors.Default}  • Gravação de DEMO: {demoStatus}{ChatColors.Default}\r\n" +
-                               $"{ChatColors.Default}  • {ChatColors.Gold}Time 1 ({_activeMatch.Team1.Name}){ChatColors.Default}: {ChatColors.Gold}{_activeMatch.Team1.MapsWon}{ChatColors.Default} mapa(s) vencido(s)\r\n" +
-                               $"{ChatColors.Default}  • {ChatColors.LightBlue}Time 2 ({_activeMatch.Team2.Name}){ChatColors.Default}: {ChatColors.LightBlue}{_activeMatch.Team2.MapsWon}{ChatColors.Default} mapa(s) vencido(s)\r\n" +
-                               $"{ChatColors.Default}=======================================================";
+                       $"{ChatColors.Default}  • Estado da Partida: {matchState}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Mapa Atual: {ChatColors.Yellow}{Server.MapName}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Modo de Jogo: {ChatColors.Yellow}{_activeMatch.GameMode}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Rounds para Vencer: {ChatColors.Yellow}{roundsParaGanhar}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Overtime: {overtimeStatus}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Round de Faca: {knifeStatus}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Fogo Amigo (config): {ffStatus}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Pausas Táticas por Time: {ChatColors.Yellow}{_pluginConfig.PausesTaticoPorEquipe}{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}  • Duração da Pausa Tática: {ChatColors.Yellow}{_pluginConfig.DuracaoPauseTatico}s{ChatColors.Default}\r\n" +
+                       $"{ChatColors.Default}=======================================================";
 
         player?.PrintToChat(configDisplay);
     }
@@ -442,8 +390,6 @@ public partial class MatchKS
         }
 
         Server.PrintToChatAll($"{MatchKS.ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} reiniciou a partida de volta para o aquecimento.");
-
-        Server.ExecuteCommand("tv_stoprecord");
 
         ResetMapStates();
 
@@ -537,40 +483,7 @@ public partial class MatchKS
         InitiateRestorePause();
     }
 
-    [ConsoleCommand("css_nometime")]
-    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
-    public void OnNoTimeCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (player == null || _isMatchLive) return;
 
-        if (command.ArgCount < 2)
-        {
-            player.PrintToChat($"{ChatPrefix} Uso: .nometime <nome_do_time>");
-            return;
-        }
-        
-        var newName = command.ArgString.Split(' ', 2).Length > 1 ? command.ArgString.Split(' ', 2)[1].Trim() : command.GetArg(1);
-        var teamNum = player.TeamNum;
-
-        if (teamNum == (byte)CsTeam.CounterTerrorist)
-        {
-            _activeMatch!.Team2.Name = newName;
-            _isCtNameCustom = true;
-            _ctNamerSteamId = player.SteamID;
-            SetTeamNameOwner(player.SteamID, newName);
-            Server.ExecuteCommand($"mp_teamname_1 \"{newName}\"");
-            Server.PrintToChatAll($"{ChatPrefix} O nome do time Contra-Terrorista foi definido para: {ChatColors.Green}{newName}");
-        }
-        else if (teamNum == (byte)CsTeam.Terrorist)
-        {
-            _activeMatch!.Team1.Name = newName;
-            _isTrNameCustom = true;
-            _trNamerSteamId = player.SteamID;
-            SetTeamNameOwner(player.SteamID, newName);
-            Server.ExecuteCommand($"mp_teamname_2 \"{newName}\"");
-            Server.PrintToChatAll($"{ChatPrefix} O nome do time Terrorista foi definido para: {ChatColors.Green}{newName}");
-        }
-    }
 
     [ConsoleCommand("css_rk"), RequiresPermissions("@css/root")]
     public void OnKnifeRoundToggle(CCSPlayerController? player, CommandInfo command)
@@ -831,33 +744,7 @@ public partial class MatchKS
         }
     }
 
-    [GameEventHandler]
-    public HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
-    {
-        if (_isDemoStartPending)
-        {
-            StartDemoRecording();
-            _isDemoStartPending = false;
-        }
 
-        if (_isMatchLive && !_isKnifeRoundActive && !_isSidePickPhase)
-        {
-            CreateRoundBackupForLiveMatch();
-        }
-
-        if (_isPauseScheduled)
-        {
-            _isPauseScheduled = false;
-            StartTacticalPause();
-        }
-        else if (_isTechPauseScheduled)
-        {
-            _isTechPauseScheduled = false;
-            StartTechPause();
-        }
-
-        return HookResult.Continue;
-    }
 
     private void InitiateRestorePause()
     {
@@ -898,6 +785,17 @@ public partial class MatchKS
     {
         if (player == null || !player.IsValid || !_isWaitingForRestoreReady) return;
 
+        if (AdminManager.PlayerHasPermissions(player, "@css/kick"))
+        {
+            _isWaitingForRestoreReady = false;
+            _restoreReadyDisplayTimer?.Kill();
+            foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid))
+                p.PrintToCenterHtml(" ");
+            Server.ExecuteCommand("mp_unpause_match");
+            Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Red}ADMIN{ChatColors.Default} despausou a partida imediatamente após restore!");
+            return;
+        }
+
         bool changed = false;
         if (player.TeamNum == (byte)CsTeam.Terrorist && !_isTeamTRestoreReady)
         {
@@ -925,4 +823,3 @@ public partial class MatchKS
         }
     }
 }
-

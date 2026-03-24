@@ -18,141 +18,23 @@ namespace MatchKS;
 
 public partial class MatchKS
 {
-    private void SetTeamNameOwner(ulong steamId, string teamName)
-    {
-        var key = steamId.ToString();
-        _teamNameOwnerConfig.SteamIdToTeamName[key] = teamName;
-        SaveTeamNameOwnerConfig();
-    }
 
-    private bool TryGetOwnedTeamName(ulong steamId, out string teamName)
-    {
-        return _teamNameOwnerConfig.SteamIdToTeamName.TryGetValue(steamId.ToString(), out teamName!);
-    }
-
-    private void ApplySideName(CsTeam side, string name)
-    {
-        if (_activeMatch == null) return;
-
-        if (side == CsTeam.Terrorist)
-        {
-            _activeMatch.Team1.Name = name;
-            _isTrNameCustom = !string.Equals(name, GetDefaultTeamName(CsTeam.Terrorist), StringComparison.OrdinalIgnoreCase);
-            Server.ExecuteCommand($"mp_teamname_2 \"{name}\"");
-        }
-        else if (side == CsTeam.CounterTerrorist)
-        {
-            _activeMatch.Team2.Name = name;
-            _isCtNameCustom = !string.Equals(name, GetDefaultTeamName(CsTeam.CounterTerrorist), StringComparison.OrdinalIgnoreCase);
-            Server.ExecuteCommand($"mp_teamname_1 \"{name}\"");
-        }
-    }
-
-    private void ClearSideOwnerAndResetName(CsTeam side)
-    {
-        if (side == CsTeam.Terrorist)
-        {
-            _trNamerSteamId = 0;
-            ApplySideName(side, GetDefaultTeamName(side));
-        }
-        else if (side == CsTeam.CounterTerrorist)
-        {
-            _ctNamerSteamId = 0;
-            ApplySideName(side, GetDefaultTeamName(side));
-        }
-    }
-
-    private void ApplyTeamOwnerOnSide(ulong steamId, CsTeam side, string ownedTeamName)
-    {
-        if (side == CsTeam.Terrorist)
-        {
-            _trNamerSteamId = steamId;
-            ApplySideName(side, ownedTeamName);
-        }
-        else if (side == CsTeam.CounterTerrorist)
-        {
-            _ctNamerSteamId = steamId;
-            ApplySideName(side, ownedTeamName);
-        }
-    }
-
-    private void HandleTeamOwnerMove(CCSPlayerController player, CsTeam oldTeam, CsTeam newTeam)
-    {
-        var steamId = player.SteamID;
-
-        if (_trNamerSteamId == steamId && oldTeam == CsTeam.Terrorist && newTeam != CsTeam.Terrorist)
-        {
-            ClearSideOwnerAndResetName(CsTeam.Terrorist);
-        }
-
-        if (_ctNamerSteamId == steamId && oldTeam == CsTeam.CounterTerrorist && newTeam != CsTeam.CounterTerrorist)
-        {
-            ClearSideOwnerAndResetName(CsTeam.CounterTerrorist);
-        }
-
-        if (!TryGetOwnedTeamName(steamId, out var ownedTeamName))
-        {
-            return;
-        }
-
-        if (newTeam == CsTeam.Terrorist)
-        {
-            if (_ctNamerSteamId == steamId)
-            {
-                ClearSideOwnerAndResetName(CsTeam.CounterTerrorist);
-            }
-
-            ApplyTeamOwnerOnSide(steamId, CsTeam.Terrorist, ownedTeamName);
-        }
-        else if (newTeam == CsTeam.CounterTerrorist)
-        {
-            if (_trNamerSteamId == steamId)
-            {
-                ClearSideOwnerAndResetName(CsTeam.Terrorist);
-            }
-
-            ApplyTeamOwnerOnSide(steamId, CsTeam.CounterTerrorist, ownedTeamName);
-        }
-    }
 
     
     [GameEventHandler]
     public HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
-        if (_isMatchLive || @event.Userid == null || !@event.Userid.IsValid || _activeMatch == null)
-            return HookResult.Continue;
-
-        var player = @event.Userid;
-        var playerTeam = (CsTeam)player.TeamNum;
-
-        if (playerTeam == CsTeam.Terrorist && !_isTrNameCustom && _trNamerSteamId == 0)
-        {
-            _activeMatch.Team1.Name = $"time_{player.PlayerName}";
-            _trNamerSteamId = player.SteamID;
-            Server.ExecuteCommand($"mp_teamname_2 \"{_activeMatch.Team1.Name}\"");
-        }
-        else if (playerTeam == CsTeam.CounterTerrorist && !_isCtNameCustom && _ctNamerSteamId == 0)
-        {
-            _activeMatch.Team2.Name = $"time_{player.PlayerName}";
-            _ctNamerSteamId = player.SteamID;
-            Server.ExecuteCommand($"mp_teamname_1 \"{_activeMatch.Team2.Name}\"");
-        }
         return HookResult.Continue;
     }
     public HookResult OnPlayerTeamChange(EventPlayerTeam @event, GameEventInfo info)
     {
-        if (_isTeamChangeLocked)
-        {
-            @event.Userid?.PrintToChat($"{ChatPrefix} Você não pode trocar de time após o início da partida.");
-            return HookResult.Stop;
-        }
+        var newTeam = (CsTeam)@event.Team;
+        var oldTeam = (CsTeam)@event.Oldteam;
 
         if (@event.Userid == null || !@event.Userid.IsValid || @event.Userid.IsBot) return HookResult.Continue;
         if (_activeMatch == null) return HookResult.Continue;
 
         var player = @event.Userid;
-        var newTeam = (CsTeam)@event.Team;
-        var oldTeam = (CsTeam)@event.Oldteam;
 
         if (oldTeam == CsTeam.Terrorist)
             _activeMatch.Team1.Players.Remove(player.SteamID.ToString());
@@ -164,49 +46,18 @@ public partial class MatchKS
         else if (newTeam == CsTeam.CounterTerrorist)
             _activeMatch.Team2.Players[player.SteamID.ToString()] = player.PlayerName;
 
-        HandleTeamOwnerMove(player, oldTeam, newTeam);
-
-
-        if (_isMatchLive) return HookResult.Continue;
-
-        if (newTeam != oldTeam && (newTeam == CsTeam.Terrorist || newTeam == CsTeam.CounterTerrorist))
-        {
-            var playersInNewTeam = Utilities.GetPlayers().Count(p => p.IsValid && !p.IsBot && p.TeamNum == (byte)newTeam && p.SteamID != player.SteamID);
-            if (playersInNewTeam == 0)
-            {
-                if (newTeam == CsTeam.Terrorist && !_isTrNameCustom && _trNamerSteamId == 0)
-                {
-                    var newName = $"time_{player.PlayerName}";
-                    _activeMatch.Team1.Name = newName;
-                    _trNamerSteamId = player.SteamID;
-                    Server.ExecuteCommand($"mp_teamname_2 \"{newName}\"");
-                    Server.PrintToChatAll($"{ChatPrefix} Nome do time Terrorista definido para {ChatColors.Green}{newName}");
-                }
-                else if (newTeam == CsTeam.CounterTerrorist && !_isCtNameCustom && _ctNamerSteamId == 0)
-                {
-                    var newName = $"time_{player.PlayerName}";
-                    _activeMatch.Team2.Name = newName;
-                    _ctNamerSteamId = player.SteamID;
-                    Server.ExecuteCommand($"mp_teamname_1 \"{newName}\"");
-                    Server.PrintToChatAll($"{ChatPrefix} Nome do time Contra-Terrorista definido para {ChatColors.Green}{newName}");
-                }
-            }
-        }
-        return HookResult.Continue;
+        return HookResult.Continue;    
     }
     private void StartMatch()
     {
         if (_isMatchLive) return;
         _isMatchLive = true;
-        _isTeamChangeLocked = true;
 
-        // Sincroniza live.cfg com os valores do config.cfg antes de executar
         SyncLiveCfgFromPluginConfig();
 
         Server.ExecuteCommand("mp_warmup_end");
         Server.ExecuteCommand("exec MatchKS/live.cfg");
 
-        // Garante que os valores do config.cfg têm prioridade, mesmo se o CFG tiver sobrescrito
         var ffValue = _pluginConfig.FogoAmigo ? 1 : 0;
         var otValue = (_activeMatch?.EnableOvertime ?? _pluginConfig.EnableOvertime) ? 1 : 0;
         Server.ExecuteCommand($"mp_friendlyfire {ffValue}");
@@ -215,7 +66,6 @@ public partial class MatchKS
 
         Server.PrintToChatAll($"{ChatPrefix} A partida está {ChatColors.Green}AO VIVO{ChatColors.Default}!");
         AddTimer(1.0f, () => Server.ExecuteCommand("mp_restartgame 1"));
-        _isDemoStartPending = true;
     }
 
     private void HandleKnifeRoundEnd(CsTeam winner)
@@ -228,7 +78,7 @@ public partial class MatchKS
     private void StartKnifeRound()
     {
         _isKnifeRoundActive = true;
-        _isTeamChangeLocked = true;
+
         Server.ExecuteCommand("mp_warmup_end");
         Server.ExecuteCommand("exec MatchKS/knife.cfg");
         Server.ExecuteCommand("mp_startmoney 0; mp_maxmoney 0");
@@ -264,7 +114,6 @@ public partial class MatchKS
         var winnerTeamName = GetTeamName((byte)_knifeRoundWinnerTeam!);
 
         Server.PrintToChatAll($"{ChatPrefix} O time {winnerTeamName} venceu o round de faca!");
-        Server.PrintToChatAll($"{ChatPrefix} Placar em {ChatColors.Gold}1x0{ChatColors.Default}. Partida pausada para escolha de lado.");
         Server.PrintToChatAll($"{ChatPrefix} Digite {ChatColors.Lime}.stay{ChatColors.Default} ou {ChatColors.Lime}.switch{ChatColors.Default} (ou .ficar/.trocar).");
 
         _sidePickDisplayTimer?.Kill();
@@ -322,20 +171,17 @@ public partial class MatchKS
 
         if (swapSides)
         {
-            _isSideSwapPending = true;
+            ApplyTrackedSideSwap();
+            _isSideSwapPending = false;
             Server.ExecuteCommand("mp_swapteams");
             Server.PrintToChatAll($"{ChatPrefix} Os times trocaram de lado!");
         }
 
-        var team1SideName = swapSides ? "CT" : "TR";
-        var team2SideName = swapSides ? "TR" : "CT";
-
-        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{_activeMatch.Team1.Name}{ChatColors.Default} começará como {ChatColors.Gold}{team1SideName}{ChatColors.Default}.");
-        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{_activeMatch.Team2.Name}{ChatColors.Default} começará como {ChatColors.LightBlue}{team2SideName}{ChatColors.Default}.");
+        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.Gold}{_activeMatch.Team1.Name}{ChatColors.Default} começará como {ChatColors.Gold}TR{ChatColors.Default}.");
+        Server.PrintToChatAll($"{ChatPrefix} {ChatColors.LightBlue}{_activeMatch.Team2.Name}{ChatColors.Default} começará como {ChatColors.LightBlue}CT{ChatColors.Default}.");
 
         AddTimer(1.5f, () => {
             Server.ExecuteCommand("mp_unpause_match");
-            UpdateTeamNames();
             StartMatch();
         });
     }
@@ -346,10 +192,27 @@ public partial class MatchKS
         if (_activeMatch == null || !_isSideSwapPending)
             return HookResult.Continue;
 
-        (_activeMatch.Team1, _activeMatch.Team2) = (_activeMatch.Team2, _activeMatch.Team1);
+        ApplyTrackedSideSwap();
         _isSideSwapPending = false;
-        AddTimer(0.5f, UpdateTeamNames);
         return HookResult.Continue;
+    }
+
+    private void ApplyTrackedSideSwap()
+    {
+        if (_activeMatch == null) return;
+
+        // Não troca Team1/Team2, apenas ajusta estados de pausa se necessário
+        if (_pausingTeam == CsTeam.Terrorist) _pausingTeam = CsTeam.CounterTerrorist;
+        else if (_pausingTeam == CsTeam.CounterTerrorist) _pausingTeam = CsTeam.Terrorist;
+
+        if (_pausingTeamScheduled == CsTeam.Terrorist) _pausingTeamScheduled = CsTeam.CounterTerrorist;
+        else if (_pausingTeamScheduled == CsTeam.CounterTerrorist) _pausingTeamScheduled = CsTeam.Terrorist;
+
+        if (_techPauseTeam == CsTeam.Terrorist) _techPauseTeam = CsTeam.CounterTerrorist;
+        else if (_techPauseTeam == CsTeam.CounterTerrorist) _techPauseTeam = CsTeam.Terrorist;
+
+        if (_techPauseScheduledTeam == CsTeam.Terrorist) _techPauseScheduledTeam = CsTeam.CounterTerrorist;
+        else if (_techPauseScheduledTeam == CsTeam.CounterTerrorist) _techPauseScheduledTeam = CsTeam.Terrorist;
     }
 
     private void SwapTeams(MatchTeam team, CsTeam side)
@@ -436,8 +299,10 @@ public partial class MatchKS
     private void ResetMapStates()
     {
         _isTeamTReady = false; _isTeamCTReady = false; _isMatchLive = false; _isKnifeRoundActive = false; _isPauseActive = false;
-        _knifeRoundWinnerTeam = null; _team1TacPausesUsed = 0; _team2TacPausesUsed = 0; _isTeamChangeLocked = false;
-        _ctNamerSteamId = 0; _trNamerSteamId = 0; _isCtNameCustom = false; _isTrNameCustom = false;
+        _knifeRoundWinnerTeam = null;
+        _team1TacPausesUsed = 0; // Reset only on new map
+        _team2TacPausesUsed = 0; // Reset only on new map
+        // removed custom team name owner logic
         _isSidePickPhase = false;
         _isSideSwapPending = false;
         _sidePickCountdown = 0;
@@ -447,8 +312,12 @@ public partial class MatchKS
         _isTechPauseScheduled = false;
         _isTechPauseActive = false;
         _pausingTeam = null;
+        _pausingTeamScheduled = CsTeam.None;
         _techPauseTeam = CsTeam.None;
         _techPauseScheduledTeam = CsTeam.None;
+        _pauseCountdown = 0;
+
+        _autoSideSwapWindowTimer?.Kill();
         _tacTimer?.Kill();
         _pauseDisplayTimer?.Kill();
         _isWaitingForRestoreReady = false;
@@ -456,12 +325,7 @@ public partial class MatchKS
         _isTeamCTRestoreReady = false;
         _restoreReadyDisplayTimer?.Kill();
     }
-    private void UpdateTeamNames()
-    {
-        if (_activeMatch == null) return;
-        Server.ExecuteCommand($"mp_teamname_1 \"{_activeMatch.Team2.Name}\"; mp_teamlogo_1 \"{_activeMatch.Team2.Tag}\"");
-        Server.ExecuteCommand($"mp_teamname_2 \"{_activeMatch.Team1.Name}\"; mp_teamlogo_2 \"{_activeMatch.Team1.Tag}\"");
-    }
+
 
     private void CheckCompetitiveMode()
     {
@@ -469,4 +333,3 @@ public partial class MatchKS
         if (gameType == null || gameMode == null || gameType.GetPrimitiveValue<int>() != 0 || gameMode.GetPrimitiveValue<int>() != 1) { Server.PrintToChatAll($"{MatchKS.ChatPrefix} O jogo não está no modo competitivo!"); }
     }
 }
-

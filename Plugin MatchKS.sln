@@ -4,8 +4,6 @@ VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MatchKS", "MatchKS.csproj", "{5E0CE110-C973-8249-3D58-1E54117E11A9}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MatchKS-Practice", "MatchKS-Practice\MatchKSPractice.csproj", "{C388B730-5403-4A9B-9E1C-98DBD17AFDA9}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU

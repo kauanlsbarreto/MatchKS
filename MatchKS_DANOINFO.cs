@@ -77,37 +77,44 @@ public partial class MatchKS
     }
     private void ShowDamageReport()
     {
-        var allPlayersAndBots = Utilities.GetPlayers().Where(p => p.IsValid && p.TeamNum > 1).ToList();
-        var humanPlayers = allPlayersAndBots.Where(p => !p.IsBot).ToList();
+        var allPlayers = Utilities.GetPlayers().Where(p => p.IsValid && p.TeamNum > 1).ToList();
+        var humanPlayers = allPlayers.Where(p => !p.IsBot).ToList();
 
         foreach (var player in humanPlayers)
         {
-            player.PrintToChat($"{ChatPrefix} Relatório de Dano do Round:");
             var playerId = player.UserId ?? 0;
+            player.PrintToChat($"{ChatPrefix} Relatório de Dano do Round:");
 
-            foreach (var enemy in allPlayersAndBots)
+            foreach (var enemy in allPlayers)
             {
-                if (enemy.UserId == playerId || enemy.TeamNum == player.TeamNum)
-                {
-                    continue;
-                }
-
                 var enemyId = enemy.UserId ?? 0;
-                
+                if (playerId == enemyId || player.TeamNum == enemy.TeamNum) continue;
+
                 int enemyHealth = (enemy.PawnIsAlive && enemy.PlayerPawn?.Value != null) ? enemy.PlayerPawn.Value.Health : 0;
                 if (enemyHealth < 0) enemyHealth = 0;
 
-                string reportLine = $" {ChatColors.Default}- [{ChatColors.Green}{enemyHealth} HP{ChatColors.Default}] {ChatColors.Lime}{enemy.PlayerName}";
-                
-                if (_playerDamageInfo.TryGetValue(playerId, out var victimDict) && victimDict.TryGetValue(enemyId, out var damageInfo))
+                int damageGiven = 0, hitsGiven = 0;
+                if (_playerDamageInfo.TryGetValue(playerId, out var dictGiven) && dictGiven.TryGetValue(enemyId, out var infoGiven))
                 {
-                    if (damageInfo.DamageDealt > 0)
-                    {
-                        reportLine += $" {ChatColors.Default}= [{ChatColors.Red}{damageInfo.DamageDealt} HP{ChatColors.Default}]";
-                    }
+                    int realDamage = 100 - enemyHealth;
+                    damageGiven = infoGiven.DamageDealt > realDamage ? realDamage : infoGiven.DamageDealt;
+                    if (damageGiven < 0) damageGiven = 0;
+                    hitsGiven = infoGiven.Hits;
                 }
-                
-                player.PrintToChat(reportLine);
+
+                int playerHealth = (player.PawnIsAlive && player.PlayerPawn?.Value != null) ? player.PlayerPawn.Value.Health : 0;
+                if (playerHealth < 0) playerHealth = 0;
+                int damageTaken = 0, hitsTaken = 0;
+                if (_playerDamageInfo.TryGetValue(enemyId, out var dictTaken) && dictTaken.TryGetValue(playerId, out var infoTaken))
+                {
+                    int realDamage = 100 - playerHealth;
+                    damageTaken = infoTaken.DamageDealt > realDamage ? realDamage : infoTaken.DamageDealt;
+                    if (damageTaken < 0) damageTaken = 0;
+                    hitsTaken = infoTaken.Hits;
+                }
+
+                string line = $"{ChatPrefix} Deu: [{damageGiven} / {hitsGiven} hits] Sofreu: [{damageTaken} / {hitsTaken} hits] - {enemy.PlayerName} [{enemyHealth} hp]";
+                player.PrintToChat(line);
             }
         }
     }
